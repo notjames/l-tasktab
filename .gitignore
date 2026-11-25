@@ -1,0 +1,8 @@
+/target/
+**/*.rs.bk
+.idea/
+.vscode/
+*.user
+*.user.*
+.qmlcache/
+CMakeLists.txt.user

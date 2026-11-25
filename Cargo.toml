@@ -1,0 +1,18 @@
+[package]
+name = "l_tasktabs"
+version = "0.1.0"
+edition = "2024"
+description = "L-TaskTabs — tray-resident tabbed TUI session manager"
+license = "LGPL-3.0-only"
+rust-version = "1.88"
+
+[[bin]]
+name = "l-tasktabs"
+path = "src/main.rs"
+
+[dependencies]
+qtbridge = { version = "0.4.1", features = ["linkme"] }
+fs2 = "0.4"
+directories = "6"
+# StatusNotifierItem tray (Qt Bridge is QGuiApplication-only; QWidget tray crashes)
+ksni = { version = "0.3.7", features = ["blocking"] }
