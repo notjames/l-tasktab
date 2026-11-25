@@ -11,8 +11,12 @@ name = "l-tasktabs"
 path = "src/main.rs"
 
 [dependencies]
-qtbridge = { version = "0.4.1", features = ["linkme"] }
+qtbridge = { version = "0.4.1", features = ["linkme", "serde_json"] }
 fs2 = "0.4"
 directories = "6"
 # StatusNotifierItem tray (Qt Bridge is QGuiApplication-only; QWidget tray crashes)
 ksni = { version = "0.3.7", features = ["blocking"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+toml = "1.2.3"

@@ -119,7 +119,7 @@ elevated = false
 ## MVP milestones
 
 1. Skeleton: `qtbridge` + QML main window + single-instance + tray (left/right gestures) — **done** (ksni StatusNotifierItem; Qt Bridge is QGuiApplication-only so QWidget/SystemTrayIcon is not used)
-2. XDG config load/save + Configure UI
+2. XDG config load/save + Configure UI — **done**
 3. Builtin terminal tab + PTY + one session (login+interactive → exec)
 4. Multi-tab + flush tab bar + survive hide
 5. Tray context menu quick actions

@@ -1,0 +1,7 @@
+# Honors ~/.agents/code-style-guide.md (needs nightly rustfmt for brace_style).
+edition = "2024"
+hard_tabs = false
+tab_spaces = 2
+brace_style = "AlwaysNextLine"
+control_brace_style = "AlwaysNextLine"
+use_small_heuristics = "Max"
