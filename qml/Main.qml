@@ -34,12 +34,12 @@ ApplicationWindow
   onActiveRuntimeChanged:
   {
     AppController.setFocusedRuntime(activeRuntimeId)
-    refreshTerminal()
-    estimateTermSize()
+    resizeDebounce.restart()
+    Qt.callLater(() => termInput.forceActiveFocus())
   }
 
-  onWidthChanged:  estimateTermSize()
-  onHeightChanged: estimateTermSize()
+  onWidthChanged:  resizeDebounce.restart()
+  onHeightChanged: resizeDebounce.restart()
 
   function refreshConfig()
   {
@@ -79,10 +79,18 @@ ApplicationWindow
 
   function refreshTerminal()
   {
-    terminalText = activeRuntimeId
+    // Prefer cached snapshot (already rendered off the UI thread when possible).
+    const html = activeRuntimeId
       ? AppController.terminalSnapshot(activeRuntimeId)
       : ""
-    quickTerm.text = terminalText
+    applyTerminalHtml(html)
+  }
+
+  function applyTerminalHtml(html)
+  {
+    if (html === terminalText)
+      return
+    terminalText = html
   }
 
   function loadEditor(s)
@@ -150,38 +158,76 @@ ApplicationWindow
   {
     if (!activeRuntimeId)
       return
+
     let data = ""
-    switch (event.key)
+    const ctrl = !!(event.modifiers & Qt.ControlModifier)
+    const alt  = !!(event.modifiers & Qt.AltModifier)
+
+    // Ctrl+A .. Ctrl+Z (critical for TUIs: Ctrl+C, Ctrl+Z, Ctrl+L, …)
+    if (ctrl && event.key >= Qt.Key_A && event.key <= Qt.Key_Z)
+      data = String.fromCharCode(event.key - Qt.Key_A + 1)
+    else if (ctrl && event.key === Qt.Key_Space)
+      data = "\u0000"
+    else if (ctrl && (event.key === Qt.Key_BracketLeft || event.key === Qt.Key_Escape))
+      data = "\u001b"
+    else switch (event.key)
     {
       case Qt.Key_Return:
       case Qt.Key_Enter:     data = "\r"; break
-      case Qt.Key_Backspace: data = "\x7f"; break
+      case Qt.Key_Backspace: data = "\u007f"; break
       case Qt.Key_Tab:       data = "\t"; break
-      case Qt.Key_Escape:    data = "\x1b"; break
-      case Qt.Key_Up:        data = "\x1b[A"; break
-      case Qt.Key_Down:      data = "\x1b[B"; break
-      case Qt.Key_Right:     data = "\x1b[C"; break
-      case Qt.Key_Left:      data = "\x1b[D"; break
-      case Qt.Key_Home:      data = "\x1b[H"; break
-      case Qt.Key_End:       data = "\x1b[F"; break
-      case Qt.Key_PageUp:    data = "\x1b[5~"; break
-      case Qt.Key_PageDown:  data = "\x1b[6~"; break
-      case Qt.Key_Delete:    data = "\x1b[3~"; break
+      case Qt.Key_Escape:    data = "\u001b"; break
+      case Qt.Key_Up:        data = "\u001b[A"; break
+      case Qt.Key_Down:      data = "\u001b[B"; break
+      case Qt.Key_Right:     data = "\u001b[C"; break
+      case Qt.Key_Left:      data = "\u001b[D"; break
+      case Qt.Key_Home:      data = "\u001b[H"; break
+      case Qt.Key_End:       data = "\u001b[F"; break
+      case Qt.Key_PageUp:    data = "\u001b[5~"; break
+      case Qt.Key_PageDown:  data = "\u001b[6~"; break
+      case Qt.Key_Delete:    data = "\u001b[3~"; break
+      case Qt.Key_Insert:    data = "\u001b[2~"; break
+      case Qt.Key_F1:        data = "\u001bOP"; break
+      case Qt.Key_F2:        data = "\u001bOQ"; break
+      case Qt.Key_F3:        data = "\u001bOR"; break
+      case Qt.Key_F4:        data = "\u001bOS"; break
+      case Qt.Key_F5:        data = "\u001b[15~"; break
+      case Qt.Key_F6:        data = "\u001b[17~"; break
+      case Qt.Key_F7:        data = "\u001b[18~"; break
+      case Qt.Key_F8:        data = "\u001b[19~"; break
+      case Qt.Key_F9:        data = "\u001b[20~"; break
+      case Qt.Key_F10:       data = "\u001b[21~"; break
+      case Qt.Key_F11:       data = "\u001b[23~"; break
+      case Qt.Key_F12:       data = "\u001b[24~"; break
       default:
         event.text && (data = event.text)
     }
-    data && AppController.writeTerminal(activeRuntimeId, data)
+
+    if (alt && data && data.length === 1 && data.charCodeAt(0) >= 32)
+      data = "\u001b" + data
+
+    if (data)
+      AppController.writeTerminal(activeRuntimeId, data)
     event.accepted = true
   }
 
   function estimateTermSize()
   {
+    if (termView.width < 8 || termView.height < 8)
+      return
     const cw = Math.max(1, termMetrics.averageCharacterWidth)
     const ch = Math.max(1, termMetrics.height)
     const cols = Math.max(40, Math.floor((termView.width  - 4) / cw))
     const rows = Math.max(10, Math.floor((termView.height - 4) / ch))
     AppController.resizeAllTerminals(rows, cols)
-    activeRuntimeId && refreshTerminal()
+  }
+
+  Timer
+  {
+    id:       resizeDebounce
+    interval: 80
+    repeat:   false
+    onTriggered: estimateTermSize()
   }
 
   function openQuickManage(x, y)
@@ -243,9 +289,12 @@ ApplicationWindow
       root.refreshRunning()
     }
 
-    function onTerminalUpdated(runtimeId)
+    function onTerminalUpdated(runtimeId, html)
     {
-      runtimeId === root.activeRuntimeId && root.refreshTerminal()
+      if (runtimeId !== root.activeRuntimeId)
+        return
+      // HTML is pre-rendered on the PTY thread — assign directly, no snapshot round-trip.
+      root.applyTerminalHtml(html)
     }
 
     function onQuickManageRequested(x, y)
@@ -339,7 +388,6 @@ ApplicationWindow
           background: null
           font.family: "monospace"
           font.pixelSize: 11
-          Keys.onPressed: (event) => sendKey(event)
         }
       }
 
@@ -452,10 +500,13 @@ ApplicationWindow
             id:           termView
             anchors.fill: parent
 
+            // Display surface only — must not steal keys from termInput.
             ScrollView
             {
+              id:           termScroll
               anchors.fill: parent
               clip:         true
+              focusPolicy:  Qt.NoFocus
 
               TextArea
               {
@@ -470,25 +521,43 @@ ApplicationWindow
                 background:       null
                 font.family:      "monospace"
                 font.pixelSize:   13
+                activeFocusOnPress: false
                 persistentSelection: true
-                focus:            true
 
-                onTextChanged: cursorPosition = length
-                Keys.onPressed: (event) => sendKey(event)
+                // Keep view pinned to bottom for TUIs without fighting key focus.
+                onTextChanged:
+                {
+                  Qt.callLater(() => {
+                    cursorPosition = length
+                    termScroll.ScrollBar.vertical.position =
+                      Math.max(0, 1.0 - termScroll.ScrollBar.vertical.size)
+                  })
+                }
               }
             }
 
-            onWidthChanged:  estimateTermSize()
-            onHeightChanged: estimateTermSize()
+            // Dedicated key sink — always focused while on Terminals tab.
+            Item
+            {
+              id:           termInput
+              anchors.fill: parent
+              focus:        true
+              activeFocusOnTab: true
+
+              Keys.onPressed: (event) => sendKey(event)
+            }
+
+            onWidthChanged:  resizeDebounce.restart()
+            onHeightChanged: resizeDebounce.restart()
 
             MouseArea
             {
-              anchors.fill: parent
-              acceptedButtons: Qt.LeftButton
+              anchors.fill:            parent
+              acceptedButtons:         Qt.LeftButton
               propagateComposedEvents: true
-              onClicked:
+              onPressed: (mouse) =>
               {
-                termArea.forceActiveFocus()
+                termInput.forceActiveFocus()
                 mouse.accepted = false
               }
             }
@@ -796,6 +865,16 @@ ApplicationWindow
     }
   }
 
+  // Keep key focus on the terminal input whenever Terminals is the active tab.
+  Connections
+  {
+    target: mainTabs
+    function onCurrentIndexChanged()
+    {
+      mainTabs.currentIndex === 0 && Qt.callLater(() => termInput.forceActiveFocus())
+    }
+  }
+
   Component.onCompleted:
   {
     AppController.startTray()
@@ -803,7 +882,7 @@ ApplicationWindow
     refreshConfig()
     refreshRunning()
     AppController.startAutostartSessions()
-    estimateTermSize()
-    termArea.forceActiveFocus()
+    resizeDebounce.restart()
+    Qt.callLater(() => termInput.forceActiveFocus())
   }
 }

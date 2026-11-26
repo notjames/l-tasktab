@@ -390,9 +390,9 @@ impl AppController
     }
   }
 
-  pub fn on_terminal_output(&mut self, runtime_id: String)
+  pub fn on_terminal_html(&mut self, runtime_id: String, html: String)
   {
-    self.terminal_updated(runtime_id);
+    self.terminal_updated(runtime_id, html);
   }
 
   pub fn on_terminal_exited(&mut self, runtime_id: String)
@@ -406,7 +406,7 @@ impl AppController
     self.status_message = "Session ended".into();
     self.sync_tray_shared();
     self.running_changed();
-    self.terminal_updated(runtime_id);
+    self.terminal_updated(runtime_id, String::new());
   }
 
   fn stop_all_running(&mut self)
@@ -431,6 +431,12 @@ impl AppController
 
   pub fn focus_running_session(&mut self, runtime_id: String)
   {
+    let html = self
+      .running
+      .iter()
+      .find(|s| s.runtime_id == runtime_id)
+      .map(|s| s.snapshot())
+      .unwrap_or_default();
     match self.focused.lock()
     {
       Ok(mut g) => *g = Some(runtime_id.clone()),
@@ -438,7 +444,7 @@ impl AppController
     }
     self.show_main_window();
     self.running_changed();
-    self.terminal_updated(runtime_id);
+    self.terminal_updated(runtime_id, html);
   }
 }
 
@@ -523,7 +529,7 @@ impl AppController
   fn running_changed(&mut self);
 
   #[qsignal(qml_name = "terminalUpdated")]
-  fn terminal_updated(&mut self, runtime_id: String);
+  fn terminal_updated(&mut self, runtime_id: String, html: String);
 
   #[qsignal(qml_name = "quickManageRequested")]
   fn quick_manage_requested(&mut self, x: i32, y: i32);
@@ -817,8 +823,17 @@ impl AppController
     }
     match runtime_id.is_empty()
     {
-      false => self.terminal_updated(runtime_id),
-      true  => {}
+      false =>
+      {
+        let html = self
+          .running
+          .iter()
+          .find(|s| s.runtime_id == runtime_id)
+          .map(|s| s.snapshot())
+          .unwrap_or_default();
+        self.terminal_updated(runtime_id, html);
+      }
+      true => {}
     }
   }
 

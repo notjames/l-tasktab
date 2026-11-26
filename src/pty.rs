@@ -19,7 +19,7 @@ use crate::AppController;
 const DEFAULT_ROWS: u16 = 24;
 const DEFAULT_COLS: u16 = 80;
 const SCROLLBACK:   usize = 5_000;
-const NOTIFY_MS:    u64 = 33;
+const NOTIFY_MS:    u64 = 50;
 
 fn nz(n: u16) -> NonZeroU16
 {
@@ -133,10 +133,11 @@ impl RunningSession
     let screen_r = Arc::clone(&screen);
     let alive_r  = Arc::clone(&alive);
     let dirty_r  = Arc::clone(&html_dirty);
+    let cache_r  = Arc::clone(&html_cache);
     let rid      = runtime_id.clone();
     thread::Builder::new()
       .name(format!("ltt-pty-{rid}"))
-      .spawn(move || read_loop(reader, screen_r, alive_r, dirty_r, focused, qt, rid))
+      .spawn(move || read_loop(reader, screen_r, alive_r, dirty_r, cache_r, focused, qt, rid))
       .context("spawn pty reader")?;
 
     Ok(Self {
@@ -435,13 +436,14 @@ fn screen_to_html(screen: &vt100::Screen) -> String
 }
 
 fn read_loop(
-  mut reader: Box<dyn Read + Send>,
-  screen:     Arc<Mutex<ScreenState>>,
-  alive:      Arc<AtomicBool>,
-  html_dirty: Arc<AtomicBool>,
-  focused:    FocusedRuntime,
-  qt:         QThreadHandle<AppController>,
-  runtime_id: String,
+  mut reader:  Box<dyn Read + Send>,
+  screen:      Arc<Mutex<ScreenState>>,
+  alive:       Arc<AtomicBool>,
+  html_dirty:  Arc<AtomicBool>,
+  html_cache:  Arc<Mutex<Option<String>>>,
+  focused:     FocusedRuntime,
+  qt:          QThreadHandle<AppController>,
+  runtime_id:  String,
 )
 {
   let mut buf    = [0u8; 8192];
@@ -458,30 +460,57 @@ fn read_loop(
       Ok(0) => break,
       Ok(n) =>
       {
-        match screen.lock()
-        {
-          Ok(mut g) => g.parser.process(&buf[..n]),
-          Err(_)    => break,
-        }
-        html_dirty.store(true, Ordering::Relaxed);
-
-        // Only wake QML for the focused tab — inactive PTYs keep running silently.
         let is_focused = match focused.lock()
         {
           Ok(g)  => g.as_ref() == Some(&runtime_id),
           Err(_) => false,
         };
-        match is_focused && last_n.elapsed() >= Duration::from_millis(NOTIFY_MS)
+
+        // Parse + (if focused) pre-render HTML on this thread so the UI
+        // thread only copies a String — keeps TUI apps feeling responsive.
+        let mut push_html: Option<String> = None;
+        match screen.lock()
         {
-          true =>
+          Ok(mut g) =>
           {
-            last_n = Instant::now();
+            g.parser.process(&buf[..n]);
+            match is_focused
+            {
+              true =>
+              {
+                let html = screen_to_html(g.parser.screen());
+                match html_cache.lock()
+                {
+                  Ok(mut c) => *c = Some(html.clone()),
+                  Err(_)    => {}
+                }
+                html_dirty.store(false, Ordering::Relaxed);
+                match last_n.elapsed() >= Duration::from_millis(NOTIFY_MS)
+                {
+                  true =>
+                  {
+                    last_n    = Instant::now();
+                    push_html = Some(html);
+                  }
+                  false => {}
+                }
+              }
+              false => html_dirty.store(true, Ordering::Relaxed),
+            }
+          }
+          Err(_) => break,
+        }
+
+        match push_html
+        {
+          Some(html) =>
+          {
             let id = runtime_id.clone();
             qt.invoke_mut(move |app: &mut AppController| {
-              app.on_terminal_output(id);
+              app.on_terminal_html(id, html);
             });
           }
-          false => {}
+          None => {}
         }
       }
       Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
