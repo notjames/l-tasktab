@@ -102,7 +102,7 @@ elevation_mode = "ask_once_memory"
 hide_on_close = true
 
 [[sessions]]
-id = "syswatch"
+id = "550e8400-e29b-41d4-a716-446655440000"  # auto UUID; not user-facing
 name = "syswatch"
 command = "syswatch"
 working_directory = "~"

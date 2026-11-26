@@ -242,6 +242,9 @@ impl AppController
   fn request_quit(&mut self)
   {
     self.quit_requested();
+    // Tray thread parks forever after ksni spawn; Qt.quit() alone can leave the
+    // process alive. Exit the whole process (window + tray).
+    std::process::exit(0);
   }
 
   #[qslot(qml_name = "startTray")]

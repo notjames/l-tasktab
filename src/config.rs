@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 const QUALIFIER:    &str = "com";
 const ORGANIZATION: &str = "jimconn";
@@ -216,18 +217,12 @@ impl Config
       false => {}
     }
 
-    let id_src = match session.id.trim().is_empty()
+    // Stable key for config/tray; owner never sets this — UUID on create.
+    session.id = match session.id.trim().is_empty()
     {
-      true  => session.name.as_str(),
-      false => session.id.as_str(),
+      true  => Uuid::new_v4().to_string(),
+      false => session.id.trim().to_string(),
     };
-    session.id = slugify(id_src);
-
-    match session.id.is_empty()
-    {
-      true  => return Err("Session id is empty after normalization".into()),
-      false => {}
-    }
 
     match self.sessions.iter_mut().find(|s| s.id == session.id)
     {
@@ -290,35 +285,4 @@ impl From<toml::ser::Error> for ConfigError
   {
     Self::TomlSer(value)
   }
-}
-
-pub fn slugify(input: &str) -> String
-{
-  let mut out       = String::new();
-  let mut prev_dash = false;
-
-  for ch in input.chars()
-  {
-    let c = ch.to_ascii_lowercase();
-    match (c.is_ascii_alphanumeric(), prev_dash, out.is_empty())
-    {
-      (true,  _,     _)     =>
-      {
-        out.push(c);
-        prev_dash = false;
-      }
-      (false, false, false) =>
-      {
-        out.push('-');
-        prev_dash = true;
-      }
-      _ => {}
-    }
-  }
-
-  while out.ends_with('-')
-  {
-    out.pop();
-  }
-  out
 }

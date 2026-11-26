@@ -20,6 +20,7 @@ ApplicationWindow
   property int    selectedSession: -1
   property bool   dirty:           false
   property string statusText:      ""
+  property string editSessionId:   ""
 
   function refreshFromBackend()
   {
@@ -51,7 +52,7 @@ ApplicationWindow
 
   function loadEditor(s)
   {
-    editId.text            = s.id || ""
+    editSessionId          = s.id || ""
     editName.text          = s.name || ""
     editCommand.text       = s.command || ""
     editCwd.text           = s.working_directory || "~"
@@ -61,7 +62,7 @@ ApplicationWindow
 
   function clearEditor()
   {
-    editId.text            = ""
+    editSessionId          = ""
     editName.text          = ""
     editCommand.text       = ""
     editCwd.text           = "~"
@@ -72,7 +73,7 @@ ApplicationWindow
   function editorPayload()
   {
     return {
-      id:                editId.text.trim(),
+      id:                editSessionId,
       name:              editName.text.trim(),
       command:           editCommand.text.trim(),
       working_directory: editCwd.text.trim() || "~",
@@ -104,7 +105,7 @@ ApplicationWindow
 
     function onQuitRequested()
     {
-      Qt.quit()
+      // Process exit is std::process::exit(0) from AppController.requestQuit().
     }
 
     function onConfigChanged()
@@ -161,10 +162,13 @@ ApplicationWindow
 
     TabBar
     {
-      id: tabs
+      id:               tabs
       Layout.fillWidth: true
+      // Application Settings first in the bar; Sessions is default on open.
+      currentIndex:     1
+
+      TabButton { text: qsTr("Application Settings") }
       TabButton { text: qsTr("Sessions") }
-      TabButton { text: qsTr("App") }
     }
 
     StackLayout
@@ -173,6 +177,65 @@ ApplicationWindow
       Layout.fillHeight: true
       currentIndex:      tabs.currentIndex
 
+      // 0 — Application Settings
+      Frame
+      {
+        ColumnLayout
+        {
+          anchors.fill:    parent
+          anchors.margins: 16
+          spacing:         14
+
+          Label
+          {
+            text:      qsTr("Application Settings")
+            font.bold: true
+          }
+
+          CheckBox
+          {
+            id:   hideOnCloseBox
+            text: qsTr("Hide to tray when closing the window")
+            onToggled: AppController.setHideOnClose(checked)
+          }
+
+          CheckBox
+          {
+            id:   autostartBox
+            text: qsTr("Autostart with desktop session (stored now; desktop entry in MVP 7)")
+            onToggled: AppController.setAutostart(checked)
+          }
+
+          RowLayout
+          {
+            Label { text: qsTr("Elevation mode") }
+            ComboBox
+            {
+              id:                    elevationModeBox
+              Layout.preferredWidth: 260
+              textRole:              "label"
+              model:                 elevationModes
+              onActivated:
+              {
+                currentIndex >= 0 && model[currentIndex]
+                  && AppController.setElevationMode(model[currentIndex].id)
+              }
+            }
+          }
+
+          Label
+          {
+            Layout.fillWidth: true
+            wrapMode:         Text.WordWrap
+            opacity:          0.7
+            text:             qsTr("Session terminals arrive in MVP 3. This screen only manages config.toml.")
+          }
+
+          Item { Layout.fillHeight: true }
+        }
+      }
+
+      // 1 — Sessions (default tab)
       RowLayout
       {
         spacing: 12
@@ -256,18 +319,10 @@ ApplicationWindow
 
             GridLayout
             {
-              columns:       2
-              columnSpacing: 10
-              rowSpacing:    8
+              columns:          2
+              columnSpacing:    10
+              rowSpacing:       8
               Layout.fillWidth: true
-
-              Label { text: qsTr("Id") }
-              TextField
-              {
-                id:               editId
-                Layout.fillWidth: true
-                placeholderText:  qsTr("auto from name if empty")
-              }
 
               Label { text: qsTr("Name") }
               TextField
@@ -312,8 +367,8 @@ ApplicationWindow
 
             Button
             {
-              text:              qsTr("Apply session")
-              Layout.alignment:  Qt.AlignRight
+              text:             qsTr("Apply session")
+              Layout.alignment: Qt.AlignRight
               onClicked:
               {
                 const err = AppController.upsertSessionJson(editorPayload())
@@ -321,63 +376,6 @@ ApplicationWindow
               }
             }
           }
-        }
-      }
-
-      Frame
-      {
-        ColumnLayout
-        {
-          anchors.fill:    parent
-          anchors.margins: 16
-          spacing:         14
-
-          Label
-          {
-            text:      qsTr("Application")
-            font.bold: true
-          }
-
-          CheckBox
-          {
-            id:   hideOnCloseBox
-            text: qsTr("Hide to tray when closing the window")
-            onToggled: AppController.setHideOnClose(checked)
-          }
-
-          CheckBox
-          {
-            id:   autostartBox
-            text: qsTr("Autostart with desktop session (stored now; desktop entry in MVP 7)")
-            onToggled: AppController.setAutostart(checked)
-          }
-
-          RowLayout
-          {
-            Label { text: qsTr("Elevation mode") }
-            ComboBox
-            {
-              id:                   elevationModeBox
-              Layout.preferredWidth: 260
-              textRole:             "label"
-              model:                elevationModes
-              onActivated:
-              {
-                currentIndex >= 0 && model[currentIndex]
-                  && AppController.setElevationMode(model[currentIndex].id)
-              }
-            }
-          }
-
-          Label
-          {
-            Layout.fillWidth: true
-            wrapMode:         Text.WordWrap
-            opacity:          0.7
-            text:             qsTr("Session terminals arrive in MVP 3. This screen only manages config.toml.")
-          }
-
-          Item { Layout.fillHeight: true }
         }
       }
     }
@@ -426,7 +424,7 @@ ApplicationWindow
       Button
       {
         text: qsTr("Quit")
-        onClicked: Qt.quit()
+        onClicked: AppController.requestQuit()
       }
     }
   }
