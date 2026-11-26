@@ -4,7 +4,7 @@ Tray-resident session manager for long-lived TUI tools — one window, many tabs
 
 Inspired by [Termibar](https://github.com/ekats/termibar) (KDE plasmoid), implemented as a **standalone, DE-agnostic application** (KDE + GNOME first).
 
-> Status: **MVP 2 done** — XDG `config.toml` + Configure UI; tray icon. See [PLAN.md](./PLAN.md).
+> Status: **MVP 4 done** — builtin PTY terminals, multi-tab, survive hide. See [PLAN.md](./PLAN.md).
 
 ## Idea
 

@@ -211,11 +211,7 @@ impl Config
       true  => return Err("Session name is required".into()),
       false => {}
     }
-    match session.command.is_empty()
-    {
-      true  => return Err("Session command is required".into()),
-      false => {}
-    }
+    // Empty command = shell-only session (short PS1).
 
     // Stable key for config/tray; owner never sets this — UUID on create.
     session.id = match session.id.trim().is_empty()

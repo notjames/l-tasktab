@@ -120,8 +120,8 @@ elevated = false
 
 1. Skeleton: `qtbridge` + QML main window + single-instance + tray (left/right gestures) — **done** (ksni StatusNotifierItem; Qt Bridge is QGuiApplication-only so QWidget/SystemTrayIcon is not used)
 2. XDG config load/save + Configure UI — **done**
-3. Builtin terminal tab + PTY + one session (login+interactive → exec)
-4. Multi-tab + flush tab bar + survive hide
+3. Builtin terminal tab + PTY + one session (login+interactive → exec) — **done**
+4. Multi-tab + flush tab bar + survive hide — **done**
 5. Tray context menu quick actions
 6. Elevation modes + elevated tab chrome
 7. Autostart desktop entry + x86_64/aarch64 packaging notes

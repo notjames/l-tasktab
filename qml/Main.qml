@@ -7,22 +7,30 @@ ApplicationWindow
 {
   id: root
 
-  width:         860
-  height:        560
-  minimumWidth:  640
-  minimumHeight: 420
+  width:         960
+  height:        640
+  minimumWidth:  720
+  minimumHeight: 480
   visible:       true
   title:         AppController.appName()
   color:         palette.window
 
-  property var    sessions:        []
-  property var    elevationModes:  []
-  property int    selectedSession: -1
-  property bool   dirty:           false
-  property string statusText:      ""
-  property string editSessionId:   ""
+  property var    sessions:         []
+  property var    elevationModes:   []
+  property var    running:          []
+  property int    selectedSession:  -1
+  property int    activeRuntime:    -1
+  property bool   dirty:            false
+  property string statusText:       ""
+  property string editSessionId:    ""
+  property string terminalText:     ""
 
-  function refreshFromBackend()
+  readonly property string activeRuntimeId:
+    (activeRuntime >= 0 && activeRuntime < running.length)
+      ? running[activeRuntime].runtimeId
+      : ""
+
+  function refreshConfig()
   {
     sessions       = AppController.sessionsJson()
     elevationModes = AppController.elevationModesJson()
@@ -34,40 +42,55 @@ ApplicationWindow
     const mode = AppController.elevationMode()
     for (let i = 0; i < elevationModeBox.count; ++i)
     {
-      if (elevationModeBox.model[i].id === mode)
-      {
-        elevationModeBox.currentIndex = i
-        break
-      }
+      elevationModeBox.model[i].id === mode
+        && (elevationModeBox.currentIndex = i, true)
+        && (i = elevationModeBox.count)
     }
 
     selectedSession = (selectedSession >= sessions.length)
       ? (sessions.length ? 0 : -1)
       : selectedSession
-
     selectedSession >= 0
       ? loadEditor(sessions[selectedSession])
       : clearEditor()
   }
 
+  function refreshRunning()
+  {
+    const prev = activeRuntimeId
+    running = AppController.runningSessionsJson()
+    let idx = -1
+    for (let i = 0; i < running.length; ++i)
+      running[i].runtimeId === prev && (idx = i)
+    activeRuntime = (idx >= 0) ? idx : (running.length ? 0 : -1)
+    refreshTerminal()
+  }
+
+  function refreshTerminal()
+  {
+    terminalText = activeRuntimeId
+      ? AppController.terminalSnapshot(activeRuntimeId)
+      : ""
+  }
+
   function loadEditor(s)
   {
-    editSessionId          = s.id || ""
-    editName.text          = s.name || ""
-    editCommand.text       = s.command || ""
-    editCwd.text           = s.working_directory || "~"
-    editAutostart.checked  = !!s.autostart
-    editElevated.checked   = !!s.elevated
+    editSessionId         = s.id || ""
+    editName.text         = s.name || ""
+    editCommand.text      = s.command || ""
+    editCwd.text          = s.working_directory || "~"
+    editAutostart.checked = !!s.autostart
+    editElevated.checked  = !!s.elevated
   }
 
   function clearEditor()
   {
-    editSessionId          = ""
-    editName.text          = ""
-    editCommand.text       = ""
-    editCwd.text           = "~"
-    editAutostart.checked  = false
-    editElevated.checked   = false
+    editSessionId         = ""
+    editName.text         = ""
+    editCommand.text      = ""
+    editCwd.text          = "~"
+    editAutostart.checked = false
+    editElevated.checked  = false
   }
 
   function editorPayload()
@@ -81,6 +104,43 @@ ApplicationWindow
       elevated:          editElevated.checked,
       backend:           "builtin"
     }
+  }
+
+  function sendKey(event)
+  {
+    if (!activeRuntimeId)
+      return
+    let data = ""
+    switch (event.key)
+    {
+      case Qt.Key_Return:
+      case Qt.Key_Enter:     data = "\r"; break
+      case Qt.Key_Backspace: data = "\x7f"; break
+      case Qt.Key_Tab:       data = "\t"; break
+      case Qt.Key_Escape:    data = "\x1b"; break
+      case Qt.Key_Up:        data = "\x1b[A"; break
+      case Qt.Key_Down:      data = "\x1b[B"; break
+      case Qt.Key_Right:     data = "\x1b[C"; break
+      case Qt.Key_Left:      data = "\x1b[D"; break
+      case Qt.Key_Home:      data = "\x1b[H"; break
+      case Qt.Key_End:       data = "\x1b[F"; break
+      case Qt.Key_PageUp:    data = "\x1b[5~"; break
+      case Qt.Key_PageDown:  data = "\x1b[6~"; break
+      case Qt.Key_Delete:    data = "\x1b[3~"; break
+      default:
+        event.text && (data = event.text)
+    }
+    data && AppController.writeTerminal(activeRuntimeId, data)
+    event.accepted = true
+  }
+
+  function estimateTermSize()
+  {
+    // ~ monospace cell size; good enough until we measure font metrics.
+    const cols = Math.max(40, Math.floor(termView.width  / 8.2))
+    const rows = Math.max(10, Math.floor(termView.height / 16))
+    activeRuntimeId
+      && AppController.resizeTerminal(activeRuntimeId, rows, cols)
   }
 
   onClosing: function (close)
@@ -103,14 +163,21 @@ ApplicationWindow
         : root.hide()
     }
 
-    function onQuitRequested()
-    {
-      // Process exit is std::process::exit(0) from AppController.requestQuit().
-    }
+    function onQuitRequested() {}
 
     function onConfigChanged()
     {
-      root.refreshFromBackend()
+      root.refreshConfig()
+    }
+
+    function onRunningChanged()
+    {
+      root.refreshRunning()
+    }
+
+    function onTerminalUpdated(runtimeId)
+    {
+      runtimeId === root.activeRuntimeId && root.refreshTerminal()
     }
   }
 
@@ -131,7 +198,7 @@ ApplicationWindow
 
       Label
       {
-        text:    "MVP 2 — configure"
+        text:    "MVP 4 — terminals"
         opacity: 0.6
       }
 
@@ -149,93 +216,152 @@ ApplicationWindow
   ColumnLayout
   {
     anchors.fill:    parent
-    anchors.margins: 12
-    spacing:         10
-
-    Label
-    {
-      Layout.fillWidth: true
-      wrapMode:         Text.WordWrap
-      opacity:          0.75
-      text:             qsTr("Config: %1").arg(AppController.configPath())
-    }
+    anchors.margins: 10
+    spacing:         8
 
     TabBar
     {
-      id:               tabs
+      id:               mainTabs
       Layout.fillWidth: true
-      // Application Settings first in the bar; Sessions is default on open.
-      currentIndex:     1
+      currentIndex:     0
 
-      TabButton { text: qsTr("Application Settings") }
+      TabButton { text: qsTr("Terminals") }
       TabButton { text: qsTr("Sessions") }
+      TabButton { text: qsTr("Application Settings") }
     }
 
     StackLayout
     {
       Layout.fillWidth:  true
       Layout.fillHeight: true
-      currentIndex:      tabs.currentIndex
+      currentIndex:      mainTabs.currentIndex
 
-      // 0 — Application Settings
-      Frame
+      // 0 — Terminals
+      ColumnLayout
       {
-        ColumnLayout
+        spacing: 0
+
+        // Flush-adjacent tab chrome (≈0–1px).
+        TabBar
         {
-          anchors.fill:    parent
-          anchors.margins: 16
-          spacing:         14
+          id:               termTabs
+          Layout.fillWidth: true
+          currentIndex:     activeRuntime
+          spacing:          0
+          visible:          running.length > 0
 
-          Label
+          Repeater
           {
-            text:      qsTr("Application Settings")
-            font.bold: true
-          }
-
-          CheckBox
-          {
-            id:   hideOnCloseBox
-            text: qsTr("Hide to tray when closing the window")
-            onToggled: AppController.setHideOnClose(checked)
-          }
-
-          CheckBox
-          {
-            id:   autostartBox
-            text: qsTr("Autostart with desktop session (stored now; desktop entry in MVP 7)")
-            onToggled: AppController.setAutostart(checked)
-          }
-
-          RowLayout
-          {
-            Label { text: qsTr("Elevation mode") }
-            ComboBox
+            model: running
+            TabButton
             {
-              id:                    elevationModeBox
-              Layout.preferredWidth: 260
-              textRole:              "label"
-              model:                 elevationModes
-              onActivated:
+              text:              modelData.name
+              width:             implicitWidth + 8
+              onClicked:         activeRuntime = index
+              // Close affordance via middle-click / context later; Stop button below.
+            }
+          }
+        }
+
+        Frame
+        {
+          id:                termFrame
+          Layout.fillWidth:  true
+          Layout.fillHeight: true
+          padding:           0
+
+          background: Rectangle
+          {
+            color: "#1e1e2e"
+          }
+
+          Item
+          {
+            id:      termView
+            anchors.fill: parent
+            focus:   true
+
+            ScrollView
+            {
+              anchors.fill: parent
+              clip:         true
+
+              TextArea
               {
-                currentIndex >= 0 && model[currentIndex]
-                  && AppController.setElevationMode(model[currentIndex].id)
+                id:               termArea
+                readOnly:         true
+                wrapMode:         TextEdit.NoWrap
+                text:             terminalText
+                color:            "#cdd6f4"
+                selectedTextColor: "#1e1e2e"
+                selectionColor:   "#89b4fa"
+                background:       null
+                font.family:      "monospace"
+                font.pixelSize:   13
+                persistentSelection: true
+                focus:            true
+
+                // Keep caret/view at bottom as output grows.
+                onTextChanged:
+                {
+                  cursorPosition = length
+                }
+
+                Keys.onPressed: (event) => sendKey(event)
+              }
+            }
+
+            onWidthChanged:  estimateTermSize()
+            onHeightChanged: estimateTermSize()
+
+            MouseArea
+            {
+              anchors.fill: parent
+              acceptedButtons: Qt.LeftButton
+              propagateComposedEvents: true
+              onClicked:
+              {
+                termArea.forceActiveFocus()
+                mouse.accepted = false
               }
             }
           }
 
           Label
           {
-            Layout.fillWidth: true
-            wrapMode:         Text.WordWrap
-            opacity:          0.7
-            text:             qsTr("Session terminals arrive in MVP 3. This screen only manages config.toml.")
+            anchors.centerIn: parent
+            visible:          running.length === 0
+            color:            "#a6adc8"
+            text:             qsTr("No running terminals.\nStart one from the Sessions tab.")
+            horizontalAlignment: Text.AlignHCenter
+          }
+        }
+
+        RowLayout
+        {
+          Layout.fillWidth: true
+          spacing:          8
+
+          Button
+          {
+            text:    qsTr("Stop tab")
+            enabled: !!activeRuntimeId
+            onClicked: AppController.stopRunningSession(activeRuntimeId)
           }
 
-          Item { Layout.fillHeight: true }
+          Item { Layout.fillWidth: true }
+
+          Label
+          {
+            text:    statusText
+            opacity: 0.75
+            elide:   Text.ElideRight
+            Layout.fillWidth: true
+          }
         }
       }
 
-      // 1 — Sessions (default tab)
+      // 1 — Sessions (configure catalog)
       RowLayout
       {
         spacing: 12
@@ -259,7 +385,6 @@ ApplicationWindow
 
             ListView
             {
-              id:                sessionList
               Layout.fillWidth:  true
               Layout.fillHeight: true
               clip:              true
@@ -337,7 +462,7 @@ ApplicationWindow
               {
                 id:               editCommand
                 Layout.fillWidth: true
-                placeholderText:  qsTr("syswatch")
+                placeholderText:  qsTr("htop   (empty = shell only)")
               }
 
               Label { text: qsTr("Working dir") }
@@ -359,23 +484,112 @@ ApplicationWindow
               CheckBox
               {
                 id:   editElevated
-                text: qsTr("Elevated")
+                text: qsTr("Elevated (start deferred to MVP 6)")
               }
             }
 
             Item { Layout.fillHeight: true }
 
-            Button
+            RowLayout
             {
-              text:             qsTr("Apply session")
               Layout.alignment: Qt.AlignRight
-              onClicked:
+              spacing:          8
+
+              Button
               {
-                const err = AppController.upsertSessionJson(editorPayload())
-                err && (statusText = err)
+                text: qsTr("Apply")
+                onClicked:
+                {
+                  const r = AppController.upsertSessionJson(editorPayload())
+                  r.indexOf("ERR:") === 0
+                    ? (statusText = r.slice(4))
+                    : (editSessionId = r, refreshConfig())
+                }
+              }
+              Button
+              {
+                text:        qsTr("Start")
+                enabled:     editName.text.trim().length > 0
+                highlighted: true
+                onClicked:
+                {
+                  const r = AppController.upsertSessionJson(editorPayload())
+                  if (r.indexOf("ERR:") === 0)
+                  {
+                    statusText = r.slice(4)
+                    return
+                  }
+                  editSessionId = r
+                  refreshConfig()
+                  const result = AppController.startConfiguredSession(r)
+                  const bad = result.indexOf("failed") >= 0
+                    || result.indexOf("Unknown") >= 0
+                    || result.length === 0
+                  bad
+                    ? (statusText = result || "Start failed")
+                    : (mainTabs.currentIndex = 0, termView.forceActiveFocus())
+                }
               }
             }
           }
+        }
+      }
+
+      // 2 — Application Settings
+      Frame
+      {
+        ColumnLayout
+        {
+          anchors.fill:    parent
+          anchors.margins: 16
+          spacing:         14
+
+          Label
+          {
+            text:      qsTr("Application Settings")
+            font.bold: true
+          }
+
+          CheckBox
+          {
+            id:   hideOnCloseBox
+            text: qsTr("Hide to tray when closing the window")
+            onToggled: AppController.setHideOnClose(checked)
+          }
+
+          CheckBox
+          {
+            id:   autostartBox
+            text: qsTr("Autostart with desktop session (stored now; desktop entry in MVP 7)")
+            onToggled: AppController.setAutostart(checked)
+          }
+
+          RowLayout
+          {
+            Label { text: qsTr("Elevation mode") }
+            ComboBox
+            {
+              id:                    elevationModeBox
+              Layout.preferredWidth: 260
+              textRole:              "label"
+              model:                 elevationModes
+              onActivated:
+              {
+                currentIndex >= 0 && model[currentIndex]
+                  && AppController.setElevationMode(model[currentIndex].id)
+              }
+            }
+          }
+
+          Label
+          {
+            Layout.fillWidth: true
+            wrapMode:         Text.WordWrap
+            opacity:          0.7
+            text:             qsTr("Running terminals survive Hide to tray. Quit ends all sessions.")
+          }
+
+          Item { Layout.fillHeight: true }
         }
       }
     }
@@ -389,8 +603,8 @@ ApplicationWindow
       {
         Layout.fillWidth: true
         elide:            Text.ElideRight
-        text:             statusText
-        opacity:          0.8
+        text:             qsTr("Config: %1").arg(AppController.configPath())
+        opacity:          0.7
       }
 
       Button
@@ -433,6 +647,9 @@ ApplicationWindow
   {
     AppController.startTray()
     AppController.showMainWindow()
-    refreshFromBackend()
+    refreshConfig()
+    refreshRunning()
+    AppController.startAutostartSessions()
+    termView.forceActiveFocus()
   }
 }

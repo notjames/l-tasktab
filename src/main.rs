@@ -1,6 +1,7 @@
-//! L-TaskTabs — QML main window, StatusNotifier tray, XDG config, single-instance.
+//! L-TaskTabs — tray app with XDG config and builtin PTY terminal tabs.
 
 mod config;
+mod pty;
 
 use std::fs::OpenOptions;
 use std::io;
@@ -17,6 +18,7 @@ use qtbridge::{QApp, QThreadHandle, QmlObject, qobject};
 use serde_json::{json, Value as JsonValue};
 
 use crate::config::{Config, ElevationMode, SessionConfig};
+use crate::pty::RunningSession;
 
 const APP_ID:   &str = "com.jimconn.ltasktabs";
 const APP_NAME: &str = "L-TaskTabs";
@@ -180,6 +182,7 @@ pub struct AppController
   config_path:     PathBuf,
   status_message:  String,
   dirty:           bool,
+  running:         Vec<RunningSession>,
 }
 
 impl Default for AppController
@@ -194,6 +197,7 @@ impl Default for AppController
         status_message: format!("Loaded {}", path.display()),
         config_path:    path,
         dirty:          false,
+        running:        Vec::new(),
       },
       Err(err) => Self {
         window_visible: false,
@@ -201,6 +205,7 @@ impl Default for AppController
         config_path:    Config::config_path().unwrap_or_else(|| PathBuf::from("config.toml")),
         status_message: format!("Config error: {err}"),
         dirty:          false,
+        running:        Vec::new(),
       },
     }
   }
@@ -218,6 +223,46 @@ impl AppController
   fn sessions_json_value(&self) -> JsonValue
   {
     serde_json::to_value(&self.config.sessions).unwrap_or_else(|_| json!([]))
+  }
+
+  fn running_json_value(&self) -> JsonValue
+  {
+    json!(
+      self
+        .running
+        .iter()
+        .map(|s| {
+          json!({
+            "runtimeId": s.runtime_id,
+            "configId":  s.config_id,
+            "name":      s.name,
+            "elevated":  s.elevated,
+          })
+        })
+        .collect::<Vec<_>>()
+    )
+  }
+
+  pub fn on_terminal_output(&mut self, runtime_id: String)
+  {
+    self.terminal_updated(runtime_id);
+  }
+
+  pub fn on_terminal_exited(&mut self, runtime_id: String)
+  {
+    self.running.retain(|s| s.runtime_id != runtime_id);
+    self.status_message = format!("Session ended");
+    self.running_changed();
+    self.terminal_updated(runtime_id);
+  }
+
+  fn stop_all_running(&mut self)
+  {
+    for s in &mut self.running
+    {
+      s.stop();
+    }
+    self.running.clear();
   }
 }
 
@@ -241,6 +286,7 @@ impl AppController
   #[qslot(qml_name = "requestQuit")]
   fn request_quit(&mut self)
   {
+    self.stop_all_running();
     self.quit_requested();
     // Tray thread parks forever after ksni spawn; Qt.quit() alone can leave the
     // process alive. Exit the whole process (window + tray).
@@ -275,6 +321,12 @@ impl AppController
 
   #[qsignal(qml_name = "configChanged")]
   fn config_changed(&mut self);
+
+  #[qsignal(qml_name = "runningChanged")]
+  fn running_changed(&mut self);
+
+  #[qsignal(qml_name = "terminalUpdated")]
+  fn terminal_updated(&mut self, runtime_id: String);
 
   #[qslot(qml_name = "appId")]
   fn app_id(&self) -> String
@@ -394,16 +446,25 @@ impl AppController
     let session: SessionConfig = match serde_json::from_value(payload)
     {
       Ok(s)    => s,
-      Err(err) => return format!("Invalid session: {err}"),
+      Err(err) => return format!("ERR:Invalid session: {err}"),
     };
+    let name = session.name.clone();
     match self.config.upsert_session(session)
     {
-      Ok(())   =>
+      Ok(()) =>
       {
+        let id = self
+          .config
+          .sessions
+          .iter()
+          .rev()
+          .find(|s| s.name == name)
+          .map(|s| s.id.clone())
+          .unwrap_or_default();
         self.mark_dirty("Session saved in memory (click Save to write config.toml)");
-        String::new()
+        id
       }
-      Err(err) => err,
+      Err(err) => format!("ERR:{err}"),
     }
   }
 
@@ -461,6 +522,116 @@ impl AppController
         self.config_changed();
         self.status_message.clone()
       }
+    }
+  }
+
+  #[qslot(qml_name = "runningSessionsJson")]
+  fn running_sessions_json(&self) -> JsonValue
+  {
+    self.running_json_value()
+  }
+
+  #[qslot(qml_name = "startConfiguredSession")]
+  fn start_configured_session(&mut self, config_id: String) -> String
+  {
+    let Some(cfg) = self.config.sessions.iter().find(|s| s.id == config_id).cloned()
+    else
+    {
+      return format!("Unknown session id");
+    };
+    let qt = self.get_thread_handle();
+    match RunningSession::spawn(&cfg, qt)
+    {
+      Ok(session) =>
+      {
+        let rid = session.runtime_id.clone();
+        self.status_message = format!("Started {}", session.name);
+        self.running.push(session);
+        self.running_changed();
+        rid
+      }
+      Err(err) =>
+      {
+        self.status_message = format!("Start failed: {err:#}");
+        self.config_changed();
+        format!("Start failed: {err:#}")
+      }
+    }
+  }
+
+  #[qslot(qml_name = "stopRunningSession")]
+  fn stop_running_session(&mut self, runtime_id: String) -> bool
+  {
+    let mut found = false;
+    self.running.retain_mut(|s| {
+      match s.runtime_id == runtime_id
+      {
+        true =>
+        {
+          s.stop();
+          found = true;
+          false
+        }
+        false => true,
+      }
+    });
+    match found
+    {
+      true =>
+      {
+        self.status_message = "Stopped session".into();
+        self.running_changed();
+        true
+      }
+      false => false,
+    }
+  }
+
+  #[qslot(qml_name = "writeTerminal")]
+  fn write_terminal(&mut self, runtime_id: String, data: String) -> bool
+  {
+    match self.running.iter().find(|s| s.runtime_id == runtime_id)
+    {
+      Some(s) => s.write_bytes(data.as_bytes()).is_ok(),
+      None    => false,
+    }
+  }
+
+  #[qslot(qml_name = "resizeTerminal")]
+  fn resize_terminal(&mut self, runtime_id: String, rows: i32, cols: i32) -> bool
+  {
+    let rows = rows.max(2) as u16;
+    let cols = cols.max(2) as u16;
+    match self.running.iter_mut().find(|s| s.runtime_id == runtime_id)
+    {
+      Some(s) => s.resize(rows, cols).is_ok(),
+      None    => false,
+    }
+  }
+
+  #[qslot(qml_name = "terminalSnapshot")]
+  fn terminal_snapshot(&self, runtime_id: String) -> String
+  {
+    match self.running.iter().find(|s| s.runtime_id == runtime_id)
+    {
+      Some(s) => s.snapshot(),
+      None    => String::new(),
+    }
+  }
+
+  #[qslot(qml_name = "startAutostartSessions")]
+  fn start_autostart_sessions(&mut self)
+  {
+    let ids: Vec<String> = self
+      .config
+      .sessions
+      .iter()
+      .filter(|s| s.autostart && !s.elevated)
+      .map(|s| s.id.clone())
+      .collect();
+    for id in ids
+    {
+      let _ = self.start_configured_session(id);
     }
   }
 }
