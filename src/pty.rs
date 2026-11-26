@@ -146,7 +146,7 @@ impl RunningSession
   {
     match self.screen.lock()
     {
-      Ok(g)  => g.parser.screen().contents(),
+      Ok(g)  => screen_to_html(g.parser.screen()),
       Err(_) => String::new(),
     }
   }
@@ -192,6 +192,207 @@ impl RunningSession
     let _ = self.child.kill();
     let _ = self.child.wait();
   }
+}
+
+/// Default terminal chrome (matches QML pane).
+const DEFAULT_FG: (u8, u8, u8) = (0xcd, 0xd6, 0xf4);
+const DEFAULT_BG: (u8, u8, u8) = (0x1e, 0x1e, 0x2e);
+
+fn ansi_idx_rgb(idx: u8) -> (u8, u8, u8)
+{
+  // xterm 256-color table
+  static BASIC: [(u8, u8, u8); 16] = [
+    (0x00, 0x00, 0x00), (0xcd, 0x00, 0x00), (0x00, 0xcd, 0x00), (0xcd, 0xcd, 0x00),
+    (0x00, 0x00, 0xee), (0xcd, 0x00, 0xcd), (0x00, 0xcd, 0xcd), (0xe5, 0xe5, 0xe5),
+    (0x7f, 0x7f, 0x7f), (0xff, 0x00, 0x00), (0x00, 0xff, 0x00), (0xff, 0xff, 0x00),
+    (0x5c, 0x5c, 0xff), (0xff, 0x00, 0xff), (0x00, 0xff, 0xff), (0xff, 0xff, 0xff),
+  ];
+  match idx
+  {
+    0..=15 => BASIC[idx as usize],
+    16..=231 =>
+    {
+      let n = idx - 16;
+      let r = n / 36;
+      let g = (n % 36) / 6;
+      let b = n % 6;
+      let ramp = |v: u8| -> u8 {
+        match v
+        {
+          0 => 0,
+          _ => 55 + 40 * v,
+        }
+      };
+      (ramp(r), ramp(g), ramp(b))
+    }
+    232..=255 =>
+    {
+      let v = 8 + 10 * (idx - 232);
+      (v, v, v)
+    }
+  }
+}
+
+fn color_rgb(c: vt100::Color, default: (u8, u8, u8)) -> (u8, u8, u8)
+{
+  match c
+  {
+    vt100::Color::Default   => default,
+    vt100::Color::Idx(i)    => ansi_idx_rgb(i),
+    vt100::Color::Rgb(r, g, b) => (r, g, b),
+  }
+}
+
+fn css_rgb((r, g, b): (u8, u8, u8)) -> String
+{
+  format!("#{r:02x}{g:02x}{b:02x}")
+}
+
+fn html_escape_push(out: &mut String, s: &str)
+{
+  for ch in s.chars()
+  {
+    match ch
+    {
+      '&'  => out.push_str("&amp;"),
+      '<'  => out.push_str("&lt;"),
+      '>'  => out.push_str("&gt;"),
+      '"'  => out.push_str("&quot;"),
+      ' '  => out.push_str("&nbsp;"),
+      '\n' => out.push_str("<br/>"),
+      _    => out.push(ch),
+    }
+  }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct RunStyle
+{
+  fg:        (u8, u8, u8),
+  bg:        (u8, u8, u8),
+  bold:      bool,
+  italic:    bool,
+  underline: bool,
+}
+
+fn cell_style(cell: &vt100::Cell) -> RunStyle
+{
+  let mut fg = color_rgb(cell.fgcolor(), DEFAULT_FG);
+  let mut bg = color_rgb(cell.bgcolor(), DEFAULT_BG);
+  match cell.inverse()
+  {
+    true  =>
+    {
+      let t = fg;
+      fg = bg;
+      bg = t;
+    }
+    false => {}
+  }
+  RunStyle {
+    fg,
+    bg,
+    bold:      cell.bold(),
+    italic:    cell.italic(),
+    underline: cell.underline(),
+  }
+}
+
+fn push_styled_run(out: &mut String, style: RunStyle, text: &str)
+{
+  match text.is_empty()
+  {
+    true  => return,
+    false => {}
+  }
+  out.push_str("<span style=\"color:");
+  out.push_str(&css_rgb(style.fg));
+  out.push_str(";background-color:");
+  out.push_str(&css_rgb(style.bg));
+  match style.bold
+  {
+    true  => out.push_str(";font-weight:bold"),
+    false => {}
+  }
+  match style.italic
+  {
+    true  => out.push_str(";font-style:italic"),
+    false => {}
+  }
+  match style.underline
+  {
+    true  => out.push_str(";text-decoration:underline"),
+    false => {}
+  }
+  out.push_str("\">");
+  html_escape_push(out, text);
+  out.push_str("</span>");
+}
+
+/// Render vt100 screen as Qt RichText HTML with ANSI colors.
+fn screen_to_html(screen: &vt100::Screen) -> String
+{
+  let (rows_nz, cols_nz) = screen.size();
+  let rows = rows_nz.get();
+  let cols = cols_nz.get();
+  let mut out = String::with_capacity((rows as usize) * (cols as usize) * 8);
+  out.push_str(
+    "<body style=\"margin:0;white-space:pre;font-family:monospace;background-color:#1e1e2e;color:#cdd6f4;\">",
+  );
+
+  for row in 0..rows
+  {
+    let mut run_style: Option<RunStyle> = None;
+    let mut run_text  = String::new();
+
+    for col in 0..cols
+    {
+      let Some(cell) = screen.cell(row, col)
+      else
+      {
+        continue;
+      };
+      match cell.is_wide_continuation()
+      {
+        true  => continue,
+        false => {}
+      }
+
+      let style = cell_style(cell);
+      let piece = match cell.has_contents()
+      {
+        true  => cell.contents(),
+        false => " ",
+      };
+
+      match run_style
+      {
+        Some(s) if s == style => run_text.push_str(piece),
+        Some(s) =>
+        {
+          push_styled_run(&mut out, s, &run_text);
+          run_style = Some(style);
+          run_text.clear();
+          run_text.push_str(piece);
+        }
+        None =>
+        {
+          run_style = Some(style);
+          run_text.push_str(piece);
+        }
+      }
+    }
+
+    match run_style
+    {
+      Some(s) => push_styled_run(&mut out, s, &run_text),
+      None    => {}
+    }
+    out.push_str("<br/>");
+  }
+
+  out.push_str("</body>");
+  out
 }
 
 fn read_loop(

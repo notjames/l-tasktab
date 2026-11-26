@@ -291,6 +291,7 @@ ApplicationWindow
                 id:               termArea
                 readOnly:         true
                 wrapMode:         TextEdit.NoWrap
+                textFormat:       TextEdit.RichText
                 text:             terminalText
                 color:            "#cdd6f4"
                 selectedTextColor: "#1e1e2e"
@@ -301,7 +302,7 @@ ApplicationWindow
                 persistentSelection: true
                 focus:            true
 
-                // Keep caret/view at bottom as output grows.
+                // Keep view at bottom as output grows.
                 onTextChanged:
                 {
                   cursorPosition = length
