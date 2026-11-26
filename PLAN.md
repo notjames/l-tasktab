@@ -122,7 +122,7 @@ elevated = false
 2. XDG config load/save + Configure UI — **done**
 3. Builtin terminal tab + PTY + one session (login+interactive → exec) — **done**
 4. Multi-tab + flush tab bar + survive hide — **done**
-5. Tray context menu quick actions
+5. Tray context menu quick actions — **partial** (tooltip list, Quick Manage popup, toggle left-click; true hover-interactive widget still TBD)
 6. Elevation modes + elevated tab chrome
 7. Autostart desktop entry + x86_64/aarch64 packaging notes
 8. Optional external-emulator backend

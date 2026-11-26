@@ -7,7 +7,8 @@ use std::fs::OpenOptions;
 use std::io;
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::sync::{LazyLock, Once};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, LazyLock, Mutex, Once};
 
 use directories::BaseDirs;
 use fs2::FileExt;
@@ -18,7 +19,7 @@ use qtbridge::{QApp, QThreadHandle, QmlObject, qobject};
 use serde_json::{json, Value as JsonValue};
 
 use crate::config::{Config, ElevationMode, SessionConfig};
-use crate::pty::RunningSession;
+use crate::pty::{FocusedRuntime, RunningSession};
 
 const APP_ID:   &str = "com.jimconn.ltasktabs";
 const APP_NAME: &str = "L-TaskTabs";
@@ -28,10 +29,21 @@ struct InstanceLock
   _file: std::fs::File,
 }
 
+#[derive(Clone, Default)]
+struct TrayShared
+{
+  window_visible: Arc<AtomicBool>,
+  /// (runtime_id, name)
+  sessions:       Arc<Mutex<Vec<(String, String)>>>,
+}
+
 struct LttTray
 {
-  qt: QThreadHandle<AppController>,
+  qt:     QThreadHandle<AppController>,
+  shared: TrayShared,
 }
+
+static TRAY_HANDLE: Mutex<Option<ksni::blocking::Handle<LttTray>>> = Mutex::new(None);
 
 fn load_tray_png(bytes: &'static [u8]) -> Option<ksni::Icon>
 {
@@ -97,14 +109,59 @@ impl ksni::Tray for LttTray
 
   fn activate(&mut self, _x: i32, _y: i32)
   {
-    self.qt.invoke_mut(AppController::show_main_window);
+    // Toggle: visible → hide; hidden → show.
+    self.qt.invoke_mut(AppController::toggle_main_window);
+  }
+
+  fn secondary_activate(&mut self, x: i32, y: i32)
+  {
+    // Middle-click / secondary → Quick Manage popup near cursor.
+    self.qt.invoke_mut(move |app: &mut AppController| {
+      app.open_quick_manage(x, y);
+    });
+  }
+
+  fn tool_tip(&self) -> ksni::ToolTip
+  {
+    let sessions = self
+      .shared
+      .sessions
+      .lock()
+      .map(|g| g.clone())
+      .unwrap_or_default();
+    let description = match sessions.is_empty()
+    {
+      true  => "No running terminals\nMiddle-click: Quick Manage".into(),
+      false =>
+      {
+        let mut lines: Vec<String> = sessions
+          .iter()
+          .map(|(_, name)| format!("• {name}"))
+          .collect();
+        lines.push(String::new());
+        lines.push("Middle-click: Quick Manage".into());
+        lines.join("\n")
+      }
+    };
+    ksni::ToolTip {
+      title:       APP_NAME.into(),
+      description,
+      ..Default::default()
+    }
   }
 
   fn menu(&self) -> Vec<ksni::MenuItem<Self>>
   {
-    vec![
+    let sessions = self
+      .shared
+      .sessions
+      .lock()
+      .map(|g| g.clone())
+      .unwrap_or_default();
+
+    let mut items = vec![
       StandardItem {
-        label:     "Show L-TaskTabs".into(),
+        label:     "Show window".into(),
         icon_name: "document-open".into(),
         activate:  Box::new(|this: &mut Self| {
           this.qt.invoke_mut(AppController::show_main_window);
@@ -112,7 +169,54 @@ impl ksni::Tray for LttTray
         ..Default::default()
       }
       .into(),
+      StandardItem {
+        label:     "Quick Manage…".into(),
+        icon_name: "preferences-system".into(),
+        activate:  Box::new(|this: &mut Self| {
+          this.qt.invoke_mut(|app: &mut AppController| {
+            app.open_quick_manage(-1, -1);
+          });
+        }),
+        ..Default::default()
+      }
+      .into(),
       ksni::MenuItem::Separator,
+    ];
+
+    for (rid, name) in sessions
+    {
+      let rid_show = rid.clone();
+      let rid_stop = rid;
+      items.push(
+        StandardItem {
+          label:    format!("Focus: {name}"),
+          activate: Box::new(move |this: &mut Self| {
+            let id = rid_show.clone();
+            this.qt.invoke_mut(move |app: &mut AppController| {
+              app.focus_running_session(id);
+            });
+          }),
+          ..Default::default()
+        }
+        .into(),
+      );
+      items.push(
+        StandardItem {
+          label:    format!("Stop: {name}"),
+          activate: Box::new(move |this: &mut Self| {
+            let id = rid_stop.clone();
+            this.qt.invoke_mut(move |app: &mut AppController| {
+              app.stop_running_session(id);
+            });
+          }),
+          ..Default::default()
+        }
+        .into(),
+      );
+    }
+
+    items.push(ksni::MenuItem::Separator);
+    items.push(
       StandardItem {
         label:     "Quit".into(),
         icon_name: "application-exit".into(),
@@ -122,7 +226,8 @@ impl ksni::Tray for LttTray
         ..Default::default()
       }
       .into(),
-    ]
+    );
+    items
   }
 }
 
@@ -183,12 +288,15 @@ pub struct AppController
   status_message:  String,
   dirty:           bool,
   running:         Vec<RunningSession>,
+  focused:         FocusedRuntime,
+  tray_shared:     TrayShared,
 }
 
 impl Default for AppController
 {
   fn default() -> Self
   {
+    let tray_shared = TrayShared::default();
     match Config::load_or_create()
     {
       Ok((config, path)) => Self {
@@ -198,6 +306,8 @@ impl Default for AppController
         config_path:    path,
         dirty:          false,
         running:        Vec::new(),
+        focused:        Arc::new(Mutex::new(None)),
+        tray_shared,
       },
       Err(err) => Self {
         window_visible: false,
@@ -206,6 +316,8 @@ impl Default for AppController
         status_message: format!("Config error: {err}"),
         dirty:          false,
         running:        Vec::new(),
+        focused:        Arc::new(Mutex::new(None)),
+        tray_shared,
       },
     }
   }
@@ -243,6 +355,41 @@ impl AppController
     )
   }
 
+  fn sync_tray_shared(&self)
+  {
+    self
+      .tray_shared
+      .window_visible
+      .store(self.window_visible, Ordering::Relaxed);
+    match self.tray_shared.sessions.lock()
+    {
+      Ok(mut g) =>
+      {
+        *g = self
+          .running
+          .iter()
+          .map(|s| (s.runtime_id.clone(), s.name.clone()))
+          .collect();
+      }
+      Err(_) => {}
+    }
+    match TRAY_HANDLE.lock()
+    {
+      Ok(g) =>
+      {
+        match g.as_ref()
+        {
+          Some(h) =>
+          {
+            let _ = h.update(|_| {});
+          }
+          None => {}
+        }
+      }
+      Err(_) => {}
+    }
+  }
+
   pub fn on_terminal_output(&mut self, runtime_id: String)
   {
     self.terminal_updated(runtime_id);
@@ -251,7 +398,13 @@ impl AppController
   pub fn on_terminal_exited(&mut self, runtime_id: String)
   {
     self.running.retain(|s| s.runtime_id != runtime_id);
-    self.status_message = format!("Session ended");
+    match self.focused.lock()
+    {
+      Ok(mut g) if g.as_ref() == Some(&runtime_id) => *g = self.running.first().map(|s| s.runtime_id.clone()),
+      _ => {}
+    }
+    self.status_message = "Session ended".into();
+    self.sync_tray_shared();
     self.running_changed();
     self.terminal_updated(runtime_id);
   }
@@ -263,6 +416,29 @@ impl AppController
       s.stop();
     }
     self.running.clear();
+    match self.focused.lock()
+    {
+      Ok(mut g) => *g = None,
+      Err(_)    => {}
+    }
+    self.sync_tray_shared();
+  }
+
+  pub fn open_quick_manage(&mut self, x: i32, y: i32)
+  {
+    self.quick_manage_requested(x, y);
+  }
+
+  pub fn focus_running_session(&mut self, runtime_id: String)
+  {
+    match self.focused.lock()
+    {
+      Ok(mut g) => *g = Some(runtime_id.clone()),
+      Err(_)    => {}
+    }
+    self.show_main_window();
+    self.running_changed();
+    self.terminal_updated(runtime_id);
   }
 }
 
@@ -273,6 +449,7 @@ impl AppController
   fn show_main_window(&mut self)
   {
     self.window_visible = true;
+    self.sync_tray_shared();
     self.window_visibility_changed(true);
   }
 
@@ -280,7 +457,18 @@ impl AppController
   fn hide_main_window(&mut self)
   {
     self.window_visible = false;
+    self.sync_tray_shared();
     self.window_visibility_changed(false);
+  }
+
+  #[qslot(qml_name = "toggleMainWindow")]
+  fn toggle_main_window(&mut self)
+  {
+    match self.window_visible
+    {
+      true  => self.hide_main_window(),
+      false => self.show_main_window(),
+    }
   }
 
   #[qslot(qml_name = "requestQuit")]
@@ -297,16 +485,25 @@ impl AppController
   fn start_tray(&self)
   {
     static START: Once = Once::new();
-    let qt = self.get_thread_handle();
+    let qt     = self.get_thread_handle();
+    let shared = self.tray_shared.clone();
     START.call_once(move || {
       std::thread::Builder::new()
         .name("ltt-tray".into())
-        .spawn(move || match (LttTray { qt }).spawn()
+        .spawn(move || match (LttTray { qt, shared }).spawn()
         {
-          Ok(_handle) => loop
+          Ok(handle) =>
           {
-            std::thread::park();
-          },
+            match TRAY_HANDLE.lock()
+            {
+              Ok(mut g) => *g = Some(handle),
+              Err(_)    => {}
+            }
+            loop
+            {
+              std::thread::park();
+            }
+          }
           Err(err) => eprintln!("{APP_NAME}: failed to start tray: {err}"),
         })
         .expect("spawn tray thread");
@@ -327,6 +524,9 @@ impl AppController
 
   #[qsignal(qml_name = "terminalUpdated")]
   fn terminal_updated(&mut self, runtime_id: String);
+
+  #[qsignal(qml_name = "quickManageRequested")]
+  fn quick_manage_requested(&mut self, x: i32, y: i32);
 
   #[qslot(qml_name = "appId")]
   fn app_id(&self) -> String
@@ -539,14 +739,21 @@ impl AppController
     {
       return format!("Unknown session id");
     };
-    let qt = self.get_thread_handle();
-    match RunningSession::spawn(&cfg, qt)
+    let qt      = self.get_thread_handle();
+    let focused = Arc::clone(&self.focused);
+    match RunningSession::spawn(&cfg, qt, focused)
     {
       Ok(session) =>
       {
         let rid = session.runtime_id.clone();
+        match self.focused.lock()
+        {
+          Ok(mut g) => *g = Some(rid.clone()),
+          Err(_)    => {}
+        }
         self.status_message = format!("Started {}", session.name);
         self.running.push(session);
+        self.sync_tray_shared();
         self.running_changed();
         rid
       }
@@ -579,12 +786,53 @@ impl AppController
     {
       true =>
       {
+        match self.focused.lock()
+        {
+          Ok(mut g) if g.as_ref() == Some(&runtime_id) =>
+          {
+            *g = self.running.first().map(|s| s.runtime_id.clone());
+          }
+          _ => {}
+        }
         self.status_message = "Stopped session".into();
+        self.sync_tray_shared();
         self.running_changed();
         true
       }
       false => false,
     }
+  }
+
+  #[qslot(qml_name = "setFocusedRuntime")]
+  fn set_focused_runtime(&mut self, runtime_id: String)
+  {
+    match self.focused.lock()
+    {
+      Ok(mut g) => *g = match runtime_id.is_empty()
+      {
+        true  => None,
+        false => Some(runtime_id.clone()),
+      },
+      Err(_) => {}
+    }
+    match runtime_id.is_empty()
+    {
+      false => self.terminal_updated(runtime_id),
+      true  => {}
+    }
+  }
+
+  #[qslot(qml_name = "resizeAllTerminals")]
+  fn resize_all_terminals(&mut self, rows: i32, cols: i32) -> bool
+  {
+    let rows = rows.max(2) as u16;
+    let cols = cols.max(2) as u16;
+    let mut ok = true;
+    for s in &mut self.running
+    {
+      ok &= s.resize(rows, cols).is_ok();
+    }
+    ok
   }
 
   #[qslot(qml_name = "writeTerminal")]

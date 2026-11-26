@@ -77,6 +77,9 @@ struct ScreenState
   parser: vt100::Parser,
 }
 
+/// Which runtime should wake the UI (active terminal tab).
+pub type FocusedRuntime = Arc<Mutex<Option<String>>>;
+
 pub struct RunningSession
 {
   pub runtime_id: String,
@@ -88,13 +91,19 @@ pub struct RunningSession
   master:         Box<dyn MasterPty + Send>,
   child:          Box<dyn Child + Send + Sync>,
   alive:          Arc<AtomicBool>,
+  html_dirty:     Arc<AtomicBool>,
+  html_cache:     Arc<Mutex<Option<String>>>,
   rows:           u16,
   cols:           u16,
 }
 
 impl RunningSession
 {
-  pub fn spawn(cfg: &SessionConfig, qt: QThreadHandle<AppController>) -> Result<Self>
+  pub fn spawn(
+    cfg:     &SessionConfig,
+    qt:      QThreadHandle<AppController>,
+    focused: FocusedRuntime,
+  ) -> Result<Self>
   {
     let runtime_id = Uuid::new_v4().to_string();
     let size = PtySize {
@@ -117,14 +126,17 @@ impl RunningSession
     let screen = Arc::new(Mutex::new(ScreenState {
       parser: vt100::Parser::new(nz(DEFAULT_ROWS), nz(DEFAULT_COLS), SCROLLBACK),
     }));
-    let alive = Arc::new(AtomicBool::new(true));
+    let alive      = Arc::new(AtomicBool::new(true));
+    let html_dirty = Arc::new(AtomicBool::new(true));
+    let html_cache = Arc::new(Mutex::new(None));
 
     let screen_r = Arc::clone(&screen);
     let alive_r  = Arc::clone(&alive);
+    let dirty_r  = Arc::clone(&html_dirty);
     let rid      = runtime_id.clone();
     thread::Builder::new()
       .name(format!("ltt-pty-{rid}"))
-      .spawn(move || read_loop(reader, screen_r, alive_r, qt, rid))
+      .spawn(move || read_loop(reader, screen_r, alive_r, dirty_r, focused, qt, rid))
       .context("spawn pty reader")?;
 
     Ok(Self {
@@ -137,6 +149,8 @@ impl RunningSession
       master: pair.master,
       child,
       alive,
+      html_dirty,
+      html_cache,
       rows: DEFAULT_ROWS,
       cols: DEFAULT_COLS,
     })
@@ -144,11 +158,35 @@ impl RunningSession
 
   pub fn snapshot(&self) -> String
   {
-    match self.screen.lock()
+    match self.html_dirty.load(Ordering::Relaxed)
+    {
+      false =>
+      {
+        match self.html_cache.lock()
+        {
+          Ok(g) => match g.as_ref()
+          {
+            Some(html) => return html.clone(),
+            None       => {}
+          },
+          Err(_) => {}
+        }
+      }
+      true => {}
+    }
+
+    let html = match self.screen.lock()
     {
       Ok(g)  => screen_to_html(g.parser.screen()),
       Err(_) => String::new(),
+    };
+    match self.html_cache.lock()
+    {
+      Ok(mut g) => *g = Some(html.clone()),
+      Err(_)    => {}
     }
+    self.html_dirty.store(false, Ordering::Relaxed);
+    html
   }
 
   pub fn write_bytes(&self, data: &[u8]) -> Result<()>
@@ -181,6 +219,7 @@ impl RunningSession
       Ok(mut g) => g.parser.set_size(nz(rows), nz(cols)),
       Err(_)    => {}
     }
+    self.html_dirty.store(true, Ordering::Relaxed);
     self.rows = rows;
     self.cols = cols;
     Ok(())
@@ -399,12 +438,14 @@ fn read_loop(
   mut reader: Box<dyn Read + Send>,
   screen:     Arc<Mutex<ScreenState>>,
   alive:      Arc<AtomicBool>,
+  html_dirty: Arc<AtomicBool>,
+  focused:    FocusedRuntime,
   qt:         QThreadHandle<AppController>,
   runtime_id: String,
 )
 {
-  let mut buf      = [0u8; 8192];
-  let mut last_n   = Instant::now() - Duration::from_millis(NOTIFY_MS);
+  let mut buf    = [0u8; 8192];
+  let mut last_n = Instant::now() - Duration::from_millis(NOTIFY_MS);
   loop
   {
     match alive.load(Ordering::SeqCst)
@@ -422,7 +463,15 @@ fn read_loop(
           Ok(mut g) => g.parser.process(&buf[..n]),
           Err(_)    => break,
         }
-        match last_n.elapsed() >= Duration::from_millis(NOTIFY_MS)
+        html_dirty.store(true, Ordering::Relaxed);
+
+        // Only wake QML for the focused tab — inactive PTYs keep running silently.
+        let is_focused = match focused.lock()
+        {
+          Ok(g)  => g.as_ref() == Some(&runtime_id),
+          Err(_) => false,
+        };
+        match is_focused && last_n.elapsed() >= Duration::from_millis(NOTIFY_MS)
         {
           true =>
           {

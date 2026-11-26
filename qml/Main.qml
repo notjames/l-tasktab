@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import QtQuick.Window
 import l_tasktabs
 
 ApplicationWindow
@@ -29,6 +30,16 @@ ApplicationWindow
     (activeRuntime >= 0 && activeRuntime < running.length)
       ? running[activeRuntime].runtimeId
       : ""
+
+  onActiveRuntimeChanged:
+  {
+    AppController.setFocusedRuntime(activeRuntimeId)
+    refreshTerminal()
+    estimateTermSize()
+  }
+
+  onWidthChanged:  estimateTermSize()
+  onHeightChanged: estimateTermSize()
 
   function refreshConfig()
   {
@@ -59,11 +70,11 @@ ApplicationWindow
   {
     const prev = activeRuntimeId
     running = AppController.runningSessionsJson()
+    quickRunning.model = running
     let idx = -1
     for (let i = 0; i < running.length; ++i)
       running[i].runtimeId === prev && (idx = i)
     activeRuntime = (idx >= 0) ? idx : (running.length ? 0 : -1)
-    refreshTerminal()
   }
 
   function refreshTerminal()
@@ -71,6 +82,7 @@ ApplicationWindow
     terminalText = activeRuntimeId
       ? AppController.terminalSnapshot(activeRuntimeId)
       : ""
+    quickTerm.text = terminalText
   }
 
   function loadEditor(s)
@@ -106,6 +118,34 @@ ApplicationWindow
     }
   }
 
+  function saveSessionEditor()
+  {
+    const r = AppController.upsertSessionJson(editorPayload())
+    if (r.indexOf("ERR:") === 0)
+    {
+      statusText = r.slice(4)
+      return ""
+    }
+    editSessionId = r
+    const err = AppController.saveConfig()
+    err
+      ? (statusText = err)
+      : (statusText = qsTr("Session saved"), refreshConfig())
+    return err ? "" : r
+  }
+
+  function saveAppSettings()
+  {
+    AppController.setHideOnClose(hideOnCloseBox.checked)
+    AppController.setAutostart(autostartBox.checked)
+    if (elevationModeBox.currentIndex >= 0 && elevationModeBox.model[elevationModeBox.currentIndex])
+      AppController.setElevationMode(elevationModeBox.model[elevationModeBox.currentIndex].id)
+    const err = AppController.saveConfig()
+    err
+      ? (statusText = err)
+      : (statusText = qsTr("Settings saved"), refreshConfig())
+  }
+
   function sendKey(event)
   {
     if (!activeRuntimeId)
@@ -136,11 +176,33 @@ ApplicationWindow
 
   function estimateTermSize()
   {
-    // ~ monospace cell size; good enough until we measure font metrics.
-    const cols = Math.max(40, Math.floor(termView.width  / 8.2))
-    const rows = Math.max(10, Math.floor(termView.height / 16))
-    activeRuntimeId
-      && AppController.resizeTerminal(activeRuntimeId, rows, cols)
+    const cw = Math.max(1, termMetrics.averageCharacterWidth)
+    const ch = Math.max(1, termMetrics.height)
+    const cols = Math.max(40, Math.floor((termView.width  - 4) / cw))
+    const rows = Math.max(10, Math.floor((termView.height - 4) / ch))
+    AppController.resizeAllTerminals(rows, cols)
+    activeRuntimeId && refreshTerminal()
+  }
+
+  function openQuickManage(x, y)
+  {
+    refreshRunning()
+    refreshTerminal()
+    quickManage.width  = 480
+    quickManage.height = 360
+    if (x >= 0 && y >= 0)
+    {
+      quickManage.x = Math.max(0, x - quickManage.width / 2)
+      quickManage.y = Math.max(0, y - quickManage.height - 12)
+    }
+    else
+    {
+      quickManage.x = root.x + (root.width  - quickManage.width)  / 2
+      quickManage.y = root.y + (root.height - quickManage.height) / 2
+    }
+    quickManage.show()
+    quickManage.raise()
+    quickManage.requestActivate()
   }
 
   onClosing: function (close)
@@ -150,6 +212,12 @@ ApplicationWindow
       root.hide(),
       AppController.hideMainWindow()
     )
+  }
+
+  FontMetrics
+  {
+    id:   termMetrics
+    font: termArea.font
   }
 
   Connections
@@ -179,6 +247,121 @@ ApplicationWindow
     {
       runtimeId === root.activeRuntimeId && root.refreshTerminal()
     }
+
+    function onQuickManageRequested(x, y)
+    {
+      root.openQuickManage(x, y)
+    }
+  }
+
+  // —— Quick Manage (tray hover companion / middle-click) ——
+  Window
+  {
+    id:      quickManage
+    title:   qsTr("L-TaskTabs — Quick Manage")
+    visible: false
+    flags:   Qt.Tool | Qt.WindowStaysOnTopHint
+    color:   palette.window
+
+    ColumnLayout
+    {
+      anchors.fill:    parent
+      anchors.margins: 10
+      spacing:         8
+
+      Label
+      {
+        text:      qsTr("Quick Manage")
+        font.bold: true
+      }
+
+      ListView
+      {
+        id:                quickRunning
+        Layout.fillWidth:  true
+        Layout.preferredHeight: 100
+        clip:              true
+        model:             running
+        delegate: ItemDelegate
+        {
+          width: ListView.view.width
+          text:  modelData.name
+          highlighted: modelData.runtimeId === activeRuntimeId
+          onClicked:
+          {
+            for (let i = 0; i < running.length; ++i)
+              running[i].runtimeId === modelData.runtimeId && (activeRuntime = i)
+            refreshTerminal()
+          }
+
+          RowLayout
+          {
+            anchors.right: parent.right
+            anchors.rightMargin: 8
+            anchors.verticalCenter: parent.verticalCenter
+            spacing: 4
+
+            Button
+            {
+              text: qsTr("Open")
+              onClicked:
+              {
+                AppController.showMainWindow()
+                mainTabs.currentIndex = 0
+                quickManage.hide()
+              }
+            }
+            Button
+            {
+              text: qsTr("Stop")
+              onClicked: AppController.stopRunningSession(modelData.runtimeId)
+            }
+          }
+        }
+      }
+
+      Frame
+      {
+        Layout.fillWidth:  true
+        Layout.fillHeight: true
+        padding:           0
+        background: Rectangle { color: "#1e1e2e" }
+
+        TextArea
+        {
+          id:         quickTerm
+          anchors.fill: parent
+          readOnly:   true
+          wrapMode:   TextEdit.NoWrap
+          textFormat: TextEdit.RichText
+          text:       terminalText
+          color:      "#cdd6f4"
+          background: null
+          font.family: "monospace"
+          font.pixelSize: 11
+          Keys.onPressed: (event) => sendKey(event)
+        }
+      }
+
+      RowLayout
+      {
+        Button
+        {
+          text: qsTr("Show main window")
+          onClicked:
+          {
+            AppController.showMainWindow()
+            quickManage.hide()
+          }
+        }
+        Item { Layout.fillWidth: true }
+        Button
+        {
+          text: qsTr("Close")
+          onClicked: quickManage.hide()
+        }
+      }
+    }
   }
 
   header: ToolBar
@@ -198,18 +381,12 @@ ApplicationWindow
 
       Label
       {
-        text:    "MVP 4 — terminals"
-        opacity: 0.6
-      }
-
-      Item { Layout.fillWidth: true }
-
-      Label
-      {
         text:    dirty ? qsTr("Unsaved changes") : qsTr("Saved")
         opacity: dirty ? 1.0 : 0.55
         color:   dirty ? palette.link : palette.windowText
       }
+
+      Item { Layout.fillWidth: true }
     }
   }
 
@@ -241,7 +418,6 @@ ApplicationWindow
       {
         spacing: 0
 
-        // Flush-adjacent tab chrome (≈0–1px).
         TabBar
         {
           id:               termTabs
@@ -255,10 +431,9 @@ ApplicationWindow
             model: running
             TabButton
             {
-              text:              modelData.name
-              width:             implicitWidth + 8
-              onClicked:         activeRuntime = index
-              // Close affordance via middle-click / context later; Stop button below.
+              text:      modelData.name
+              width:     implicitWidth + 8
+              onClicked: activeRuntime = index
             }
           }
         }
@@ -270,16 +445,12 @@ ApplicationWindow
           Layout.fillHeight: true
           padding:           0
 
-          background: Rectangle
-          {
-            color: "#1e1e2e"
-          }
+          background: Rectangle { color: "#1e1e2e" }
 
           Item
           {
-            id:      termView
+            id:           termView
             anchors.fill: parent
-            focus:   true
 
             ScrollView
             {
@@ -302,12 +473,7 @@ ApplicationWindow
                 persistentSelection: true
                 focus:            true
 
-                // Keep view at bottom as output grows.
-                onTextChanged:
-                {
-                  cursorPosition = length
-                }
-
+                onTextChanged: cursorPosition = length
                 Keys.onPressed: (event) => sendKey(event)
               }
             }
@@ -354,15 +520,15 @@ ApplicationWindow
 
           Label
           {
-            text:    statusText
-            opacity: 0.75
-            elide:   Text.ElideRight
+            text:             statusText
+            opacity:          0.75
+            elide:            Text.ElideRight
             Layout.fillWidth: true
           }
         }
       }
 
-      // 1 — Sessions (configure catalog)
+      // 1 — Sessions
       RowLayout
       {
         spacing: 12
@@ -420,7 +586,12 @@ ApplicationWindow
               {
                 text:    qsTr("Delete")
                 enabled: selectedSession >= 0
-                onClicked: AppController.removeSession(sessions[selectedSession].id)
+                onClicked:
+                {
+                  AppController.removeSession(sessions[selectedSession].id)
+                  const err = AppController.saveConfig()
+                  err ? (statusText = err) : refreshConfig()
+                }
               }
             }
           }
@@ -498,31 +669,21 @@ ApplicationWindow
 
               Button
               {
-                text: qsTr("Apply")
-                onClicked:
-                {
-                  const r = AppController.upsertSessionJson(editorPayload())
-                  r.indexOf("ERR:") === 0
-                    ? (statusText = r.slice(4))
-                    : (editSessionId = r, refreshConfig())
-                }
+                text:        qsTr("Save")
+                highlighted: true
+                enabled:     editName.text.trim().length > 0
+                onClicked:   saveSessionEditor()
               }
               Button
               {
-                text:        qsTr("Start")
-                enabled:     editName.text.trim().length > 0
-                highlighted: true
+                text:    qsTr("Start")
+                enabled: editName.text.trim().length > 0
                 onClicked:
                 {
-                  const r = AppController.upsertSessionJson(editorPayload())
-                  if (r.indexOf("ERR:") === 0)
-                  {
-                    statusText = r.slice(4)
+                  const id = saveSessionEditor()
+                  if (!id)
                     return
-                  }
-                  editSessionId = r
-                  refreshConfig()
-                  const result = AppController.startConfiguredSession(r)
+                  const result = AppController.startConfiguredSession(id)
                   const bad = result.indexOf("failed") >= 0
                     || result.indexOf("Unknown") >= 0
                     || result.length === 0
@@ -555,14 +716,12 @@ ApplicationWindow
           {
             id:   hideOnCloseBox
             text: qsTr("Hide to tray when closing the window")
-            onToggled: AppController.setHideOnClose(checked)
           }
 
           CheckBox
           {
             id:   autostartBox
             text: qsTr("Autostart with desktop session (stored now; desktop entry in MVP 7)")
-            onToggled: AppController.setAutostart(checked)
           }
 
           RowLayout
@@ -574,11 +733,6 @@ ApplicationWindow
               Layout.preferredWidth: 260
               textRole:              "label"
               model:                 elevationModes
-              onActivated:
-              {
-                currentIndex >= 0 && model[currentIndex]
-                  && AppController.setElevationMode(model[currentIndex].id)
-              }
             }
           }
 
@@ -587,10 +741,18 @@ ApplicationWindow
             Layout.fillWidth: true
             wrapMode:         Text.WordWrap
             opacity:          0.7
-            text:             qsTr("Running terminals survive Hide to tray. Quit ends all sessions.")
+            text:             qsTr("Tray: left-click toggles window; hover shows running tabs; middle-click opens Quick Manage.")
           }
 
           Item { Layout.fillHeight: true }
+
+          Button
+          {
+            text:             qsTr("Save")
+            highlighted:      true
+            Layout.alignment: Qt.AlignRight
+            onClicked:        saveAppSettings()
+          }
         }
       }
     }
@@ -619,16 +781,6 @@ ApplicationWindow
       }
       Button
       {
-        text:        qsTr("Save")
-        highlighted: dirty
-        onClicked:
-        {
-          const err = AppController.saveConfig()
-          err && (statusText = err)
-        }
-      }
-      Button
-      {
         text: qsTr("Hide to tray")
         onClicked:
         {
@@ -651,6 +803,7 @@ ApplicationWindow
     refreshConfig()
     refreshRunning()
     AppController.startAutostartSessions()
-    termView.forceActiveFocus()
+    estimateTermSize()
+    termArea.forceActiveFocus()
   }
 }
