@@ -280,6 +280,33 @@ fn ensure_xdg_dirs()
   let _ = std::fs::create_dir_all(proj.cache_dir());
 }
 
+fn check_display_environment() -> Result<(), String>
+{
+  // Explicit headless platforms are useful for diagnostics and should be
+  // left to Qt to validate. Normal tray operation requires a desktop display.
+  let platform = std::env::var("QT_QPA_PLATFORM").unwrap_or_default();
+  if matches!(platform.as_str(), "offscreen" | "minimal" | "minimalegl")
+  {
+    return Ok(());
+  }
+
+  let has_display = ["DISPLAY", "WAYLAND_DISPLAY"]
+    .iter()
+    .any(|name| std::env::var(name).map(|v| !v.trim().is_empty()).unwrap_or(false));
+  if has_display
+  {
+    return Ok(());
+  }
+
+  Err(
+    "no graphical display detected (DISPLAY and WAYLAND_DISPLAY are empty).\n\
+     Start l-tasktabs from a terminal inside your KDE/GNOME session, or restore \
+     the session environment before retrying.\n\
+     Diagnostic: echo \"DISPLAY=$DISPLAY\" \"WAYLAND_DISPLAY=$WAYLAND_DISPLAY\""
+      .into(),
+  )
+}
+
 pub struct AppController
 {
   window_visible:  bool,
@@ -392,21 +419,31 @@ impl AppController
 
   pub fn on_terminal_html(&mut self, runtime_id: String, html: String)
   {
+    // Always emit — QML keeps a per-runtime cache so frames are never lost to races.
     self.terminal_updated(runtime_id, html);
   }
 
   pub fn on_terminal_exited(&mut self, runtime_id: String)
   {
+    let name = self
+      .running
+      .iter()
+      .find(|s| s.runtime_id == runtime_id)
+      .map(|s| s.name.clone())
+      .unwrap_or_else(|| runtime_id.clone());
     self.running.retain(|s| s.runtime_id != runtime_id);
     match self.focused.lock()
     {
       Ok(mut g) if g.as_ref() == Some(&runtime_id) => *g = self.running.first().map(|s| s.runtime_id.clone()),
       _ => {}
     }
-    self.status_message = "Session ended".into();
+    self.status_message = format!(
+      "Session '{name}' ended. Check that its command exists and is on PATH."
+    );
     self.sync_tray_shared();
     self.running_changed();
     self.terminal_updated(runtime_id, String::new());
+    self.config_changed();
   }
 
   fn stop_all_running(&mut self)
@@ -481,9 +518,20 @@ impl AppController
   fn request_quit(&mut self)
   {
     self.stop_all_running();
+    let tray = TRAY_HANDLE
+      .lock()
+      .ok()
+      .and_then(|g| g.as_ref().cloned());
+    if let Some(handle) = tray
+    {
+      // Sending shutdown is enough here. Waiting synchronously would block
+      // the Qt thread that must process Qt.quit().
+      let _ = handle.shutdown();
+    }
     self.quit_requested();
-    // Tray thread parks forever after ksni spawn; Qt.quit() alone can leave the
-    // process alive. Exit the whole process (window + tray).
+    // The Qt event loop does not reliably terminate when the request
+    // originates from the detached StatusNotifier thread. Force process
+    // termination after the application-owned sessions and tray are stopped.
     std::process::exit(0);
   }
 
@@ -530,6 +578,9 @@ impl AppController
 
   #[qsignal(qml_name = "terminalUpdated")]
   fn terminal_updated(&mut self, runtime_id: String, html: String);
+
+  #[qsignal(qml_name = "sessionStarted")]
+  fn session_started(&mut self, runtime_id: String);
 
   #[qsignal(qml_name = "quickManageRequested")]
   fn quick_manage_requested(&mut self, x: i32, y: i32);
@@ -745,22 +796,35 @@ impl AppController
     {
       return format!("Unknown session id");
     };
+    if cfg.elevated
+    {
+      self.status_message = format!(
+        "Session '{}' was not started: elevation support is not implemented yet.",
+        cfg.name
+      );
+      self.config_changed();
+      return self.status_message.clone();
+    }
     let qt      = self.get_thread_handle();
     let focused = Arc::clone(&self.focused);
     match RunningSession::spawn(&cfg, qt, focused)
     {
       Ok(session) =>
       {
-        let rid = session.runtime_id.clone();
+        let rid  = session.runtime_id.clone();
+        let name = session.name.clone();
+        // Focus the session we just started. QML mirrors this via sessionStarted
+        // (selects the new tab) so Rust push + visible pane stay aligned.
         match self.focused.lock()
         {
           Ok(mut g) => *g = Some(rid.clone()),
           Err(_)    => {}
         }
-        self.status_message = format!("Started {}", session.name);
+        self.status_message = format!("Started {name}");
         self.running.push(session);
         self.sync_tray_shared();
         self.running_changed();
+        self.session_started(rid.clone());
         rid
       }
       Err(err) =>
@@ -821,6 +885,8 @@ impl AppController
       },
       Err(_) => {}
     }
+    // Push a fresh frame for the newly focused tab. Never emit an empty string
+    // here — that used to wipe a good frame when the PTY had not produced yet.
     match runtime_id.is_empty()
     {
       false =>
@@ -831,7 +897,11 @@ impl AppController
           .find(|s| s.runtime_id == runtime_id)
           .map(|s| s.snapshot())
           .unwrap_or_default();
-        self.terminal_updated(runtime_id, html);
+        match html.is_empty()
+        {
+          false => self.terminal_updated(runtime_id, html),
+          true  => {}
+        }
       }
       true => {}
     }
@@ -872,6 +942,24 @@ impl AppController
     }
   }
 
+  #[qslot(qml_name = "sendTerminalMouse")]
+  fn send_terminal_mouse(
+    &mut self,
+    runtime_id: String,
+    kind:      i32,
+    button:    i32,
+    col:       i32,
+    row:       i32,
+    modifiers: i32,
+  ) -> bool
+  {
+    match self.running.iter().find(|s| s.runtime_id == runtime_id)
+    {
+      Some(s) => s.send_mouse(kind, button, col, row, modifiers).unwrap_or(false),
+      None    => false,
+    }
+  }
+
   #[qslot(qml_name = "terminalSnapshot")]
   fn terminal_snapshot(&self, runtime_id: String) -> String
   {
@@ -892,9 +980,24 @@ impl AppController
       .filter(|s| s.autostart && !s.elevated)
       .map(|s| s.id.clone())
       .collect();
+    let skipped_elevated = self
+      .config
+      .sessions
+      .iter()
+      .filter(|s| s.autostart && s.elevated)
+      .map(|s| s.name.clone())
+      .collect::<Vec<_>>();
     for id in ids
     {
       let _ = self.start_configured_session(id);
+    }
+    if !skipped_elevated.is_empty()
+    {
+      self.status_message = format!(
+        "Autostart skipped elevated session(s): {} (elevation is not implemented yet)",
+        skipped_elevated.join(", ")
+      );
+      self.config_changed();
     }
   }
 }
@@ -902,6 +1005,12 @@ impl AppController
 fn main() -> ExitCode
 {
   ensure_xdg_dirs();
+
+  if let Err(err) = check_display_environment()
+  {
+    eprintln!("{APP_NAME}: {err}");
+    return ExitCode::FAILURE;
+  }
 
   let _lock = match acquire_instance_lock()
   {

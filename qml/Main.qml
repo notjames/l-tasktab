@@ -25,6 +25,9 @@ ApplicationWindow
   property string statusText:       ""
   property string editSessionId:    ""
   property string terminalText:     ""
+  // Per-runtime HTML so background tabs keep updating and tab switches
+  // never show another session's buffer.
+  property var    htmlById:         ({})
 
   readonly property string activeRuntimeId:
     (activeRuntime >= 0 && activeRuntime < running.length)
@@ -34,6 +37,9 @@ ApplicationWindow
   onActiveRuntimeChanged:
   {
     AppController.setFocusedRuntime(activeRuntimeId)
+    activeRuntimeId && htmlById[activeRuntimeId]
+      ? applyTerminalHtml(htmlById[activeRuntimeId])
+      : refreshTerminal()
     resizeDebounce.restart()
     Qt.callLater(() => termInput.forceActiveFocus())
   }
@@ -61,9 +67,11 @@ ApplicationWindow
     selectedSession = (selectedSession >= sessions.length)
       ? (sessions.length ? 0 : -1)
       : selectedSession
-    selectedSession >= 0
-      ? loadEditor(sessions[selectedSession])
-      : clearEditor()
+    // Keep unsaved "New session" fields intact while upsert/save emits
+    // configChanged. Refreshing session 0 here overwrites the new session
+    // payload and causes Start to launch the original tab again.
+    if (selectedSession >= 0)
+      loadEditor(sessions[selectedSession])
   }
 
   function refreshRunning()
@@ -83,7 +91,15 @@ ApplicationWindow
     const html = activeRuntimeId
       ? AppController.terminalSnapshot(activeRuntimeId)
       : ""
+    activeRuntimeId && html && storeHtml(activeRuntimeId, html)
     applyTerminalHtml(html)
+  }
+
+  function storeHtml(runtimeId, html)
+  {
+    const next = Object.assign({}, htmlById)
+    next[runtimeId] = html
+    htmlById = next
   }
 
   function applyTerminalHtml(html)
@@ -91,6 +107,18 @@ ApplicationWindow
     if (html === terminalText)
       return
     terminalText = html
+  }
+
+  function selectRuntime(runtimeId)
+  {
+    for (let i = 0; i < running.length; ++i)
+    {
+      if (running[i].runtimeId === runtimeId)
+      {
+        activeRuntime = i
+        return
+      }
+    }
   }
 
   function loadEditor(s)
@@ -222,6 +250,38 @@ ApplicationWindow
     AppController.resizeAllTerminals(rows, cols)
   }
 
+  function terminalMouseButton(button)
+  {
+    if (button === Qt.LeftButton)
+      return 0
+    if (button === Qt.MiddleButton)
+      return 1
+    if (button === Qt.RightButton)
+      return 2
+    return 0
+  }
+
+  function terminalMouseModifiers(modifiers)
+  {
+    let value = 0
+    modifiers & Qt.ShiftModifier && (value |= 1)
+    modifiers & Qt.AltModifier && (value |= 2)
+    modifiers & Qt.ControlModifier && (value |= 4)
+    return value
+  }
+
+  function sendTerminalMouse(kind, button, x, y, modifiers)
+  {
+    if (!activeRuntimeId)
+      return false
+    const content = termScroll.contentItem
+    const cellX = Math.floor((x + content.contentX) / Math.max(1, termMetrics.averageCharacterWidth)) + 1
+    const cellY = Math.floor((y + content.contentY) / Math.max(1, termMetrics.height)) + 1
+    return AppController.sendTerminalMouse(
+      activeRuntimeId, kind, terminalMouseButton(button), cellX, cellY,
+      terminalMouseModifiers(modifiers))
+  }
+
   Timer
   {
     id:       resizeDebounce
@@ -277,7 +337,10 @@ ApplicationWindow
         : root.hide()
     }
 
-    function onQuitRequested() {}
+    function onQuitRequested()
+    {
+      Qt.quit()
+    }
 
     function onConfigChanged()
     {
@@ -289,12 +352,21 @@ ApplicationWindow
       root.refreshRunning()
     }
 
+    function onSessionStarted(runtimeId)
+    {
+      // Align QML selection with the session the user just started so Rust
+      // focus and the visible pane stay in sync (fixes blank/swapped panes).
+      root.selectRuntime(runtimeId)
+      const cached = root.htmlById[runtimeId]
+      cached ? root.applyTerminalHtml(cached) : root.refreshTerminal()
+    }
+
     function onTerminalUpdated(runtimeId, html)
     {
-      if (runtimeId !== root.activeRuntimeId)
-        return
-      // HTML is pre-rendered on the PTY thread — assign directly, no snapshot round-trip.
-      root.applyTerminalHtml(html)
+      // Always cache; only paint when this runtime is the active tab.
+      root.storeHtml(runtimeId, html)
+      if (runtimeId === root.activeRuntimeId)
+        root.applyTerminalHtml(html)
     }
 
     function onQuickManageRequested(x, y)
@@ -376,7 +448,7 @@ ApplicationWindow
         padding:           0
         background: Rectangle { color: "#1e1e2e" }
 
-        TextArea
+        TextEdit
         {
           id:         quickTerm
           anchors.fill: parent
@@ -385,7 +457,6 @@ ApplicationWindow
           textFormat: TextEdit.RichText
           text:       terminalText
           color:      "#cdd6f4"
-          background: null
           font.family: "monospace"
           font.pixelSize: 11
         }
@@ -508,7 +579,7 @@ ApplicationWindow
               clip:         true
               focusPolicy:  Qt.NoFocus
 
-              TextArea
+              TextEdit
               {
                 id:               termArea
                 readOnly:         true
@@ -518,7 +589,6 @@ ApplicationWindow
                 color:            "#cdd6f4"
                 selectedTextColor: "#1e1e2e"
                 selectionColor:   "#89b4fa"
-                background:       null
                 font.family:      "monospace"
                 font.pixelSize:   13
                 activeFocusOnPress: false
@@ -553,12 +623,31 @@ ApplicationWindow
             MouseArea
             {
               anchors.fill:            parent
-              acceptedButtons:         Qt.LeftButton
+              acceptedButtons:         Qt.LeftButton | Qt.MiddleButton | Qt.RightButton
               propagateComposedEvents: true
               onPressed: (mouse) =>
               {
                 termInput.forceActiveFocus()
-                mouse.accepted = false
+                mouse.accepted = sendTerminalMouse(
+                  0, mouse.button, mouse.x, mouse.y, mouse.modifiers)
+              }
+              onReleased: (mouse) =>
+              {
+                mouse.accepted = sendTerminalMouse(
+                  1, mouse.button, mouse.x, mouse.y, mouse.modifiers)
+              }
+              onPositionChanged: (mouse) =>
+              {
+                if (mouse.buttons !== Qt.NoButton)
+                  mouse.accepted = sendTerminalMouse(
+                    2, mouse.buttons & Qt.LeftButton ? Qt.LeftButton : mouse.buttons & Qt.MiddleButton ? Qt.MiddleButton : Qt.RightButton,
+                    mouse.x, mouse.y, mouse.modifiers)
+              }
+              onWheel: (wheel) =>
+              {
+                const kind = wheel.angleDelta.y > 0 ? 3 : 4
+                wheel.accepted = sendTerminalMouse(
+                  kind, Qt.NoButton, wheel.x, wheel.y, wheel.modifiers)
               }
             }
           }
@@ -755,6 +844,7 @@ ApplicationWindow
                   const result = AppController.startConfiguredSession(id)
                   const bad = result.indexOf("failed") >= 0
                     || result.indexOf("Unknown") >= 0
+                    || result.indexOf("not started") >= 0
                     || result.length === 0
                   bad
                     ? (statusText = result || "Start failed")

@@ -29,6 +29,8 @@ Living plan. **Locked** decisions are marked as such; open items stay TBD.
 - Tray-first; professional; follow DE theme where practical.
 - Many configured TUI “terms” runnable **simultaneously**.
 - Tabbed session UI; tabs **flush adjacent** (≈0–1px).
+- Terminal panes should support mouse interaction within tabs (selection,
+  copy/paste, scrolling, and mouse-reporting for TUIs).
 - Sessions **survive window hide**; end on tab close, stop, or tray Quit.
 - Secure desktop defaults; elevated tabs visually distinct.
 - Linux first; **x86_64** + **aarch64**; KDE + GNOME (DE-agnostic where possible).

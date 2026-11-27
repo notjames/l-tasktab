@@ -12,6 +12,7 @@ use anyhow::{Context, Result};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use qtbridge::QThreadHandle;
 use uuid::Uuid;
+use vt100::{MouseProtocolEncoding, MouseProtocolMode};
 
 use crate::config::SessionConfig;
 use crate::AppController;
@@ -19,7 +20,8 @@ use crate::AppController;
 const DEFAULT_ROWS: u16 = 24;
 const DEFAULT_COLS: u16 = 80;
 const SCROLLBACK:   usize = 5_000;
-const NOTIFY_MS:    u64 = 50;
+/// Background (unfocused) sessions coalesce UI wakes to this interval.
+const BG_NOTIFY_MS: u64 = 100;
 
 fn nz(n: u16) -> NonZeroU16
 {
@@ -198,6 +200,74 @@ impl RunningSession
     Ok(())
   }
 
+  pub fn send_mouse(
+    &self,
+    kind:      i32,
+    button:    i32,
+    col:       i32,
+    row:       i32,
+    modifiers: i32,
+  ) -> Result<bool>
+  {
+    let (mode, encoding) = match self.screen.lock()
+    {
+      Ok(g) => (g.parser.screen().mouse_protocol_mode(), g.parser.screen().mouse_protocol_encoding()),
+      Err(_) => return Ok(false),
+    };
+    if mode == MouseProtocolMode::None
+    {
+      return Ok(false);
+    }
+
+    let is_wheel = kind == 3 || kind == 4;
+    let is_motion = kind == 2;
+    let is_release = kind == 1;
+    match (is_wheel, is_motion, is_release)
+    {
+      (false, true, _) if !matches!(mode, MouseProtocolMode::ButtonMotion | MouseProtocolMode::AnyMotion) =>
+        return Ok(false),
+      (false, false, true) if mode == MouseProtocolMode::Press => return Ok(false),
+      _ => {}
+    }
+
+    let mut code = match kind
+    {
+      3 => 64,
+      4 => 65,
+      _ => button.clamp(0, 2),
+    };
+    if is_motion
+    {
+      code |= 32;
+    }
+    if modifiers & 1 != 0
+    {
+      code |= 4;
+    }
+    if modifiers & 2 != 0
+    {
+      code |= 8;
+    }
+    if modifiers & 4 != 0
+    {
+      code |= 16;
+    }
+
+    let col = col.max(1);
+    let row = row.max(1);
+    let bytes = match (encoding, is_release)
+    {
+      (MouseProtocolEncoding::Sgr, true) =>
+        format!("\x1b[<{};{};{}m", code, col, row).into_bytes(),
+      (MouseProtocolEncoding::Sgr, false) =>
+        format!("\x1b[<{};{};{}M", code, col, row).into_bytes(),
+      (_, true) => vec![0x1b, b'[', b'M', 35 + 3, (col + 32).clamp(33, 255) as u8, (row + 32).clamp(33, 255) as u8],
+      (_, false) => vec![0x1b, b'[', b'M', (code + 32).clamp(32, 255) as u8, (col + 32).clamp(33, 255) as u8, (row + 32).clamp(33, 255) as u8],
+    };
+    self.write_bytes(&bytes)?;
+    Ok(true)
+  }
+
   pub fn resize(&mut self, rows: u16, cols: u16) -> Result<()>
   {
     let rows = rows.max(2);
@@ -230,7 +300,6 @@ impl RunningSession
   {
     self.alive.store(false, Ordering::SeqCst);
     let _ = self.child.kill();
-    let _ = self.child.wait();
   }
 }
 
@@ -446,8 +515,9 @@ fn read_loop(
   runtime_id:  String,
 )
 {
-  let mut buf    = [0u8; 8192];
-  let mut last_n = Instant::now() - Duration::from_millis(NOTIFY_MS);
+  let mut buf         = [0u8; 8192];
+  let mut last_pushed = String::new();
+  let mut last_n      = Instant::now() - Duration::from_millis(BG_NOTIFY_MS);
   loop
   {
     match alive.load(Ordering::SeqCst)
@@ -466,36 +536,36 @@ fn read_loop(
           Err(_) => false,
         };
 
-        // Parse + (if focused) pre-render HTML on this thread so the UI
-        // thread only copies a String — keeps TUI apps feeling responsive.
         let mut push_html: Option<String> = None;
         match screen.lock()
         {
           Ok(mut g) =>
           {
             g.parser.process(&buf[..n]);
-            match is_focused
+            let html = screen_to_html(g.parser.screen());
+            match html_cache.lock()
+            {
+              Ok(mut c) => *c = Some(html.clone()),
+              Err(_)    => {}
+            }
+            html_dirty.store(false, Ordering::Relaxed);
+
+            // Deliver distinct frames to QML (caches by runtime, paints active).
+            // Focused → immediate; background → coalesce to BG_NOTIFY_MS.
+            // last_pushed is only advanced on push so a throttled change is
+            // still emitted on the next due read.
+            match html != last_pushed
+              && (is_focused
+                || last_pushed.is_empty()
+                || last_n.elapsed() >= Duration::from_millis(BG_NOTIFY_MS))
             {
               true =>
               {
-                let html = screen_to_html(g.parser.screen());
-                match html_cache.lock()
-                {
-                  Ok(mut c) => *c = Some(html.clone()),
-                  Err(_)    => {}
-                }
-                html_dirty.store(false, Ordering::Relaxed);
-                match last_n.elapsed() >= Duration::from_millis(NOTIFY_MS)
-                {
-                  true =>
-                  {
-                    last_n    = Instant::now();
-                    push_html = Some(html);
-                  }
-                  false => {}
-                }
+                last_n      = Instant::now();
+                last_pushed = html.clone();
+                push_html   = Some(html);
               }
-              false => html_dirty.store(true, Ordering::Relaxed),
+              false => {}
             }
           }
           Err(_) => break,
