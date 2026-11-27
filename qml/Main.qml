@@ -614,7 +614,6 @@ ApplicationWindow
                 onTextChanged:
                 {
                   Qt.callLater(() => {
-                    cursorPosition = length
                     termScroll.ScrollBar.vertical.position =
                       Math.max(0, 1.0 - termScroll.ScrollBar.vertical.size)
                   })

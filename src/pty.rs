@@ -23,7 +23,7 @@ const DEFAULT_COLS: u16 = 80;
 const SCROLLBACK:   usize = 5_000;
 /// Background (unfocused) sessions coalesce UI wakes to this interval.
 /// Limit full RichText regeneration; PTY parsing remains immediate.
-const FOCUSED_NOTIFY_MS: u64 = 33;
+const FOCUSED_NOTIFY_MS: u64 = 66;
 /// Background sessions update less often because they are not visible.
 const BG_NOTIFY_MS: u64 = 100;
 
