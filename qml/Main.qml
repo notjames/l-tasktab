@@ -764,8 +764,15 @@ ApplicationWindow
                 onTextChanged:
                 {
                   Qt.callLater(() => {
-                    termScroll.ScrollBar.vertical.position =
-                      Math.max(0, 1.0 - termScroll.ScrollBar.vertical.size)
+                    const cellHeight = Math.max(1, termMetrics.height)
+                    const maxY = Math.max(
+                      0,
+                      termScroll.contentItem.contentHeight - termScroll.height)
+                    // Rich text can make the exact bottom offset fractional.
+                    // Snap to a cell boundary so the first visible row is
+                    // never rendered halfway off-screen.
+                    termScroll.contentItem.contentY =
+                      Math.floor(maxY / cellHeight) * cellHeight
                   })
                 }
               }
