@@ -829,7 +829,7 @@ ApplicationWindow
               CheckBox
               {
                 id:   editElevated
-                text: qsTr("Elevated (start deferred to MVP 6)")
+                text: qsTr("Elevated (sudo; autostart disabled)")
               }
             }
 

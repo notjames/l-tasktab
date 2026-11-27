@@ -796,10 +796,10 @@ impl AppController
     {
       return format!("Unknown session id");
     };
-    if cfg.elevated
+    if cfg.elevated && self.config.app.elevation_mode == ElevationMode::Keyring
     {
       self.status_message = format!(
-        "Session '{}' was not started: elevation support is not implemented yet.",
+        "Session '{}' was not started: keyring elevation is not implemented yet.",
         cfg.name
       );
       self.config_changed();
@@ -807,7 +807,8 @@ impl AppController
     }
     let qt      = self.get_thread_handle();
     let focused = Arc::clone(&self.focused);
-    match RunningSession::spawn(&cfg, qt, focused)
+    let elevation_mode = self.config.app.elevation_mode.clone();
+    match RunningSession::spawn(&cfg, elevation_mode, qt, focused)
     {
       Ok(session) =>
       {
@@ -994,7 +995,7 @@ impl AppController
     if !skipped_elevated.is_empty()
     {
       self.status_message = format!(
-        "Autostart skipped elevated session(s): {} (elevation is not implemented yet)",
+        "Autostart skipped elevated session(s): {} (start manually to approve sudo)",
         skipped_elevated.join(", ")
       );
       self.config_changed();

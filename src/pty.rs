@@ -14,7 +14,7 @@ use qtbridge::QThreadHandle;
 use uuid::Uuid;
 use vt100::{MouseProtocolEncoding, MouseProtocolMode};
 
-use crate::config::SessionConfig;
+use crate::config::{ElevationMode, SessionConfig};
 use crate::AppController;
 
 const DEFAULT_ROWS: u16 = 24;
@@ -44,16 +44,39 @@ fn user_shell() -> String
   std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into())
 }
 
-fn build_command(cfg: &SessionConfig) -> CommandBuilder
+fn build_command(cfg: &SessionConfig, elevation_mode: &ElevationMode) -> CommandBuilder
 {
   let shell   = user_shell();
-  let mut cmd = CommandBuilder::new(&shell);
+  let mut cmd = match cfg.elevated
+  {
+    false => CommandBuilder::new(&shell),
+    true =>
+    {
+      let mut sudo = CommandBuilder::new("sudo");
+      match elevation_mode
+      {
+        ElevationMode::AskEveryTime => {
+          sudo.arg("-k");
+        }
+        ElevationMode::SudoTicket => {
+          sudo.arg("-n");
+        }
+        ElevationMode::AskOnceMemory | ElevationMode::Keyring => {}
+      }
+      sudo.arg("--");
+      sudo.arg(&shell);
+      sudo
+    }
+  };
   let cwd     = expand_cwd(&cfg.working_directory);
   cmd.cwd(cwd);
 
-  for (k, v) in &cfg.env
+  if !cfg.elevated
   {
-    cmd.env(k, v);
+    for (k, v) in &cfg.env
+    {
+      cmd.env(k, v);
+    }
   }
 
   match cfg.command.trim().is_empty()
@@ -103,6 +126,7 @@ impl RunningSession
 {
   pub fn spawn(
     cfg:     &SessionConfig,
+    elevation_mode: ElevationMode,
     qt:      QThreadHandle<AppController>,
     focused: FocusedRuntime,
   ) -> Result<Self>
@@ -118,7 +142,7 @@ impl RunningSession
     let pair       = pty_system.openpty(size).context("openpty")?;
     let child      = pair
       .slave
-      .spawn_command(build_command(cfg))
+      .spawn_command(build_command(cfg, &elevation_mode))
       .context("spawn session command")?;
     drop(pair.slave);
 
