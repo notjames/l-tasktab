@@ -124,7 +124,9 @@ elevated = false
 2. XDG config load/save + Configure UI — **done**
 3. Builtin terminal tab + PTY + one session (login+interactive → exec) — **done**
 4. Multi-tab + flush tab bar + survive hide — **done**
-5. Tray context menu quick actions — **partial** (tooltip list, Quick Manage popup, toggle left-click; true hover-interactive widget still TBD)
+5. Tray context menu quick actions — **partial** (live Quick Manage popup with
+   focus/stop/start controls, tooltip list, toggle left-click; true hover event
+   support remains DE-dependent)
 6. Elevation modes + elevated tab chrome — **partial** (sudo prompt and
    existing-ticket modes; keyring/polkit integration remains)
 7. Autostart desktop entry + x86_64/aarch64 packaging notes — **partial**
