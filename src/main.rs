@@ -3,7 +3,7 @@
 mod config;
 mod pty;
 
-use std::fs::OpenOptions;
+use std::fs::{self, OpenOptions};
 use std::io;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -304,6 +304,55 @@ fn check_display_environment() -> Result<(), String>
      the session environment before retrying.\n\
      Diagnostic: echo \"DISPLAY=$DISPLAY\" \"WAYLAND_DISPLAY=$WAYLAND_DISPLAY\""
       .into(),
+  )
+}
+
+fn autostart_desktop_path() -> io::Result<PathBuf>
+{
+  let Some(base) = BaseDirs::new()
+  else
+  {
+    return Err(io::Error::new(
+      io::ErrorKind::NotFound,
+      "could not resolve the user config directory",
+    ));
+  };
+  Ok(base.config_dir().join("autostart/l-tasktabs.desktop"))
+}
+
+fn sync_autostart_entry(enabled: bool) -> io::Result<()>
+{
+  let path = autostart_desktop_path()?;
+  if !enabled
+  {
+    return match fs::remove_file(path)
+    {
+      Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+      result => result,
+    };
+  }
+
+  let executable = std::env::current_exe()?;
+  let executable = executable
+    .display()
+    .to_string()
+    .replace('\\', "\\\\")
+    .replace('"', "\\\"");
+  if let Some(parent) = path.parent()
+  {
+    fs::create_dir_all(parent)?;
+  }
+  fs::write(
+    path,
+    format!(
+      "[Desktop Entry]\n\
+       Type=Application\n\
+       Name=L-TaskTabs\n\
+       Comment=Tray-resident TUI session manager\n\
+       Exec=\"{executable}\"\n\
+       Terminal=false\n\
+       X-GNOME-Autostart-enabled=true\n"
+    ),
   )
 }
 
@@ -749,6 +798,12 @@ impl AppController
       {
         self.dirty          = false;
         self.status_message = format!("Saved {}", self.config_path.display());
+        if let Err(err) = sync_autostart_entry(self.config.app.autostart)
+        {
+          self.status_message = format!(
+            "Config saved, but autostart update failed: {err}"
+          );
+        }
         self.config_changed();
         String::new()
       }

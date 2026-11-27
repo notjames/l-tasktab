@@ -127,7 +127,8 @@ elevated = false
 5. Tray context menu quick actions — **partial** (tooltip list, Quick Manage popup, toggle left-click; true hover-interactive widget still TBD)
 6. Elevation modes + elevated tab chrome — **partial** (sudo prompt and
    existing-ticket modes; keyring/polkit integration remains)
-7. Autostart desktop entry + x86_64/aarch64 packaging notes
+7. Autostart desktop entry + x86_64/aarch64 packaging notes — **partial**
+   (desktop entry implemented; packaging notes remain)
 8. Optional external-emulator backend
 
 ---
