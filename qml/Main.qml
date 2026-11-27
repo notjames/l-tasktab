@@ -27,6 +27,7 @@ ApplicationWindow
   property string statusText:       ""
   property string editSessionId:    ""
   property string terminalText:     ""
+  property string dragRuntimeId:    ""
   // Per-runtime HTML so background tabs keep updating and tab switches
   // never show another session's buffer.
   property var    htmlById:         ({})
@@ -139,6 +140,37 @@ ApplicationWindow
         return
       }
     }
+  }
+
+  function reorderRuntime(runtimeId, targetIndex)
+  {
+    const fromIndex = running.findIndex(s => s.runtimeId === runtimeId)
+    if (fromIndex < 0 || targetIndex < 0 || targetIndex >= running.length
+      || fromIndex === targetIndex)
+      return
+
+    const next = running.slice()
+    const moved = next.splice(fromIndex, 1)[0]
+    next.splice(targetIndex, 0, moved)
+    running = next
+    activeRuntime = running.findIndex(s => s.runtimeId === runtimeId)
+  }
+
+  function runtimeDropIndex(tabBar, pointerX)
+  {
+    let target = running.length - 1
+    for (let i = 0; i < tabBar.contentItem.children.length; ++i)
+    {
+      const child = tabBar.contentItem.children[i]
+      if (child.objectName !== "runtimeTab")
+        continue
+      if (pointerX < child.x + child.width / 2)
+      {
+        target = running.findIndex(s => s.runtimeId === child.runtimeId)
+        break
+      }
+    }
+    return target
   }
 
   function loadEditor(s)
@@ -641,9 +673,52 @@ ApplicationWindow
             model: running
             TabButton
             {
-              text:      modelData.name
-              width:     implicitWidth + 8
-              onClicked: activeRuntime = index
+              id:        runtimeTab
+              objectName: "runtimeTab"
+              property string runtimeId: modelData.runtimeId
+              property bool dragging: false
+              property real pressX: 0
+              text:       modelData.name
+              width:      implicitWidth + 8
+              opacity:    dragging ? 0.65 : 1.0
+
+              MouseArea
+              {
+                anchors.fill: parent
+                acceptedButtons: Qt.LeftButton
+                preventStealing: true
+                onPressed:
+                {
+                  root.dragRuntimeId = runtimeTab.runtimeId
+                  runtimeTab.pressX = mouse.x
+                  runtimeTab.dragging = false
+                }
+                onPositionChanged:
+                {
+                  if (!runtimeTab.dragging
+                    && Math.abs(mouse.x - runtimeTab.pressX) >= 8)
+                    runtimeTab.dragging = true
+                  if (runtimeTab.dragging)
+                  {
+                    const pointerX = runtimeTab.x + mouse.x
+                    root.reorderRuntime(
+                      root.dragRuntimeId,
+                      root.runtimeDropIndex(termTabs, pointerX))
+                  }
+                }
+                onReleased:
+                {
+                  if (!runtimeTab.dragging)
+                    root.selectRuntime(root.dragRuntimeId)
+                  runtimeTab.dragging = false
+                  root.dragRuntimeId = ""
+                }
+                onCanceled:
+                {
+                  runtimeTab.dragging = false
+                  root.dragRuntimeId = ""
+                }
+              }
             }
           }
         }
