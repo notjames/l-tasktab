@@ -60,6 +60,7 @@ ApplicationWindow
     statusText     = AppController.statusMessage()
     hideOnCloseBox.checked = AppController.hideOnClose()
     autostartBox.checked   = AppController.autostart()
+    quickManageBox.checked = AppController.quickManageEnabled()
 
     const mode = AppController.elevationMode()
     for (let i = 0; i < elevationModeBox.count; ++i)
@@ -191,6 +192,7 @@ ApplicationWindow
   {
     AppController.setHideOnClose(hideOnCloseBox.checked)
     AppController.setAutostart(autostartBox.checked)
+    AppController.setQuickManageEnabled(quickManageBox.checked)
     if (elevationModeBox.currentIndex >= 0 && elevationModeBox.model[elevationModeBox.currentIndex])
       AppController.setElevationMode(elevationModeBox.model[elevationModeBox.currentIndex].id)
     const err = AppController.saveConfig()
@@ -939,6 +941,12 @@ ApplicationWindow
             text: qsTr("Autostart with desktop session (stored now; desktop entry in MVP 7)")
           }
 
+          CheckBox
+          {
+            id:   quickManageBox
+            text: qsTr("Enable tray Quick Manage (middle-click fallback)")
+          }
+
           RowLayout
           {
             Label { text: qsTr("Elevation mode") }
@@ -956,7 +964,7 @@ ApplicationWindow
             Layout.fillWidth: true
             wrapMode:         Text.WordWrap
             opacity:          0.7
-            text:             qsTr("Tray: left-click toggles window; hover shows running tabs; middle-click opens Quick Manage.")
+            text:             qsTr("Tray: left-click toggles the window; hover shows a tooltip; middle-click opens the terminal selector popup.")
           }
 
           Item { Layout.fillHeight: true }

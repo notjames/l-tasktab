@@ -68,6 +68,8 @@ pub struct AppSettings
   #[serde(default)]
   pub elevation_mode: ElevationMode,
   #[serde(default = "default_true")]
+  pub quick_manage_enabled: bool,
+  #[serde(default = "default_true")]
   pub hide_on_close:  bool,
 }
 
@@ -83,6 +85,7 @@ impl Default for AppSettings
     Self {
       autostart:      false,
       elevation_mode: ElevationMode::AskOnceMemory,
+      quick_manage_enabled: true,
       hide_on_close:  true,
     }
   }

@@ -32,7 +32,8 @@ struct InstanceLock
 #[derive(Clone, Default)]
 struct TrayShared
 {
-  window_visible: Arc<AtomicBool>,
+  window_visible:       Arc<AtomicBool>,
+  quick_manage_enabled: Arc<AtomicBool>,
   /// (runtime_id, name)
   sessions:       Arc<Mutex<Vec<(String, String)>>>,
 }
@@ -116,9 +117,12 @@ impl ksni::Tray for LttTray
   fn secondary_activate(&mut self, x: i32, y: i32)
   {
     // Middle-click / secondary → Quick Manage popup near cursor.
-    self.qt.invoke_mut(move |app: &mut AppController| {
-      app.open_quick_manage(x, y);
-    });
+    if self.shared.quick_manage_enabled.load(Ordering::Relaxed)
+    {
+      self.qt.invoke_mut(move |app: &mut AppController| {
+        app.open_quick_manage(x, y);
+      });
+    }
   }
 
   fn tool_tip(&self) -> ksni::ToolTip
@@ -372,7 +376,10 @@ impl Default for AppController
 {
   fn default() -> Self
   {
-    let tray_shared = TrayShared::default();
+    let tray_shared = TrayShared {
+      quick_manage_enabled: Arc::new(AtomicBool::new(true)),
+      ..Default::default()
+    };
     match Config::load_or_create()
     {
       Ok((config, path)) => Self {
@@ -437,6 +444,10 @@ impl AppController
       .tray_shared
       .window_visible
       .store(self.window_visible, Ordering::Relaxed);
+    self
+      .tray_shared
+      .quick_manage_enabled
+      .store(self.config.app.quick_manage_enabled, Ordering::Relaxed);
     match self.tray_shared.sessions.lock()
     {
       Ok(mut g) =>
@@ -702,6 +713,23 @@ impl AppController
         self.config.app.autostart = value;
         self.mark_dirty("Autostart updated (unsaved; desktop entry in a later MVP)");
       }
+    }
+  }
+
+  #[qslot(qml_name = "quickManageEnabled")]
+  fn quick_manage_enabled(&self) -> bool
+  {
+    self.config.app.quick_manage_enabled
+  }
+
+  #[qslot(qml_name = "setQuickManageEnabled")]
+  fn set_quick_manage_enabled(&mut self, value: bool)
+  {
+    if self.config.app.quick_manage_enabled != value
+    {
+      self.config.app.quick_manage_enabled = value;
+      self.mark_dirty("Tray Quick Manage binding updated (unsaved)");
+      self.sync_tray_shared();
     }
   }
 
