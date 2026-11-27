@@ -20,6 +20,7 @@ ApplicationWindow
   property var    elevationModes:   []
   property var    running:          []
   property int    selectedSession:  -1
+  property bool   newSessionMode:   false
   property int    activeRuntime:    -1
   property bool   dirty:            false
   property string statusText:       ""
@@ -64,14 +65,21 @@ ApplicationWindow
         && (i = elevationModeBox.count)
     }
 
-    selectedSession = (selectedSession >= sessions.length)
-      ? (sessions.length ? 0 : -1)
-      : selectedSession
-    // Keep unsaved "New session" fields intact while upsert/save emits
-    // configChanged. Refreshing session 0 here overwrites the new session
-    // payload and causes Start to launch the original tab again.
-    if (selectedSession >= 0)
+    if (!sessions.length)
+    {
+      selectedSession = -1
+      newSessionMode = false
+      clearEditor()
+    }
+    else if (!newSessionMode)
+    {
+      // Configured sessions are the default editor view; New is an explicit
+      // mode entered through the button beside the session list.
+      selectedSession = (selectedSession < 0 || selectedSession >= sessions.length)
+        ? 0
+        : selectedSession
       loadEditor(sessions[selectedSession])
+    }
   }
 
   function refreshRunning()
@@ -166,7 +174,12 @@ ApplicationWindow
     const err = AppController.saveConfig()
     err
       ? (statusText = err)
-      : (statusText = qsTr("Session saved"), refreshConfig())
+      : (
+          newSessionMode = false,
+          selectedSession = sessions.findIndex(s => s.id === editSessionId),
+          statusText = qsTr("Session saved"),
+          refreshConfig()
+        )
     return err ? "" : r
   }
 
@@ -722,6 +735,7 @@ ApplicationWindow
                 highlighted: index === selectedSession
                 onClicked:
                 {
+                  newSessionMode = false
                   selectedSession = index
                   loadEditor(sessions[index])
                 }
@@ -736,6 +750,7 @@ ApplicationWindow
                 onClicked:
                 {
                   selectedSession = -1
+                  newSessionMode = true
                   clearEditor()
                   editName.forceActiveFocus()
                 }
