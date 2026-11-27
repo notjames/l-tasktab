@@ -223,22 +223,8 @@ impl ksni::Tray for LttTray
   fn activate(&mut self, x: i32, y: i32)
   {
     record_tray_anchor(&self.shared, x, y);
-    // X11 keeps the conventional left-click window toggle. On Wayland,
-    // StatusNotifier does not reliably deliver secondary/middle activation,
-    // so automatic mode uses left-click for the terminal popover instead.
-    if !x11_session_available()
-      && self.shared.quick_manage_enabled.load(Ordering::Relaxed)
-      && self.shared.quick_manage_hover.load(Ordering::Relaxed)
-    {
-      self.shared.quick_manage_visible.store(true, Ordering::Relaxed);
-      self.qt.invoke_mut(move |app: &mut AppController| {
-        app.open_quick_manage(x, y);
-      });
-    }
-    else
-    {
-      self.qt.invoke_mut(AppController::toggle_main_window);
-    }
+    // Left-click always toggles the full application window.
+    self.qt.invoke_mut(AppController::toggle_main_window);
   }
 
   fn secondary_activate(&mut self, x: i32, y: i32)
@@ -272,7 +258,7 @@ impl ksni::Tray for LttTray
           .map(|(_, name)| format!("• {name}"))
           .collect();
         lines.push(String::new());
-        lines.push("Middle-click: Quick Manage".into());
+        lines.push("Hover on X11 or middle-click: terminal popup".into());
         lines.join("\n")
       }
     };
@@ -285,14 +271,7 @@ impl ksni::Tray for LttTray
 
   fn menu(&self) -> Vec<ksni::MenuItem<Self>>
   {
-    let sessions = self
-      .shared
-      .sessions
-      .lock()
-      .map(|g| g.clone())
-      .unwrap_or_default();
-
-    let mut items = vec![
+    let items = vec![
       StandardItem {
         label:     "Show window".into(),
         icon_name: "document-open".into(),
@@ -303,54 +282,6 @@ impl ksni::Tray for LttTray
       }
       .into(),
       StandardItem {
-        label:     "Quick Manage…".into(),
-        icon_name: "preferences-system".into(),
-        activate:  Box::new(|this: &mut Self| {
-          this.qt.invoke_mut(|app: &mut AppController| {
-            app.open_quick_manage(-1, -1);
-          });
-        }),
-        ..Default::default()
-      }
-      .into(),
-      ksni::MenuItem::Separator,
-    ];
-
-    for (rid, name) in sessions
-    {
-      let rid_show = rid.clone();
-      let rid_stop = rid;
-      items.push(
-        StandardItem {
-          label:    format!("Focus: {name}"),
-          activate: Box::new(move |this: &mut Self| {
-            let id = rid_show.clone();
-            this.qt.invoke_mut(move |app: &mut AppController| {
-              app.focus_running_session(id);
-            });
-          }),
-          ..Default::default()
-        }
-        .into(),
-      );
-      items.push(
-        StandardItem {
-          label:    format!("Stop: {name}"),
-          activate: Box::new(move |this: &mut Self| {
-            let id = rid_stop.clone();
-            this.qt.invoke_mut(move |app: &mut AppController| {
-              app.stop_running_session(id);
-            });
-          }),
-          ..Default::default()
-        }
-        .into(),
-      );
-    }
-
-    items.push(ksni::MenuItem::Separator);
-    items.push(
-      StandardItem {
         label:     "Quit".into(),
         icon_name: "application-exit".into(),
         activate:  Box::new(|this: &mut Self| {
@@ -359,7 +290,7 @@ impl ksni::Tray for LttTray
         ..Default::default()
       }
       .into(),
-    );
+    ];
     items
   }
 }

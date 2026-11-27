@@ -55,7 +55,6 @@ ApplicationWindow
   function refreshConfig()
   {
     sessions       = AppController.sessionsJson()
-    quickConfigured.model = sessions
     elevationModes = AppController.elevationModesJson()
     quickManageTriggers = AppController.quickManageTriggersJson()
     dirty          = AppController.isDirty()
@@ -336,8 +335,8 @@ ApplicationWindow
   {
     refreshRunning()
     refreshTerminal()
-    quickManage.width  = 480
-    quickManage.height = 460
+    quickManage.width  = 720
+    quickManage.height = 420
     if (x >= 0 && y >= 0)
     {
       quickManage.x = Math.max(0, x - quickManage.width / 2)
@@ -457,12 +456,6 @@ ApplicationWindow
       anchors.margins: 10
       spacing:         8
 
-      Label
-      {
-        text:      qsTr("Quick Manage · %1 running").arg(running.length)
-        font.bold: true
-      }
-
       TabBar
       {
         id:               quickTabs
@@ -489,37 +482,6 @@ ApplicationWindow
         visible: running.length === 0
         text:    qsTr("No running terminals")
         opacity: 0.65
-      }
-
-      Label
-      {
-        text:      qsTr("Configured sessions")
-        font.bold: true
-        visible:   sessions.length > 0
-      }
-
-      ListView
-      {
-        id:                   quickConfigured
-        Layout.fillWidth:     true
-        Layout.preferredHeight: Math.min(100, sessions.length * 34)
-        clip:                 true
-        model:                sessions
-        visible:              sessions.length > 0
-        delegate: ItemDelegate
-        {
-          width: ListView.view.width
-          height: 34
-          text: modelData.name
-          onClicked:
-          {
-            const result = AppController.startConfiguredSession(modelData.id)
-            if (result.indexOf("failed") >= 0
-              || result.indexOf("not started") >= 0
-              || result.indexOf("Unknown") >= 0)
-              statusText = result
-          }
-        }
       }
 
       Frame
@@ -589,30 +551,6 @@ ApplicationWindow
         }
       }
 
-      RowLayout
-      {
-        Button
-        {
-          text: qsTr("Stop selected")
-          enabled: !!activeRuntimeId
-          onClicked: AppController.stopRunningSession(activeRuntimeId)
-        }
-        Button
-        {
-          text: qsTr("Show main window")
-          onClicked:
-          {
-            AppController.showMainWindow()
-            quickManage.hide()
-          }
-        }
-        Item { Layout.fillWidth: true }
-        Button
-        {
-          text: qsTr("Close")
-          onClicked: quickManage.hide()
-        }
-      }
     }
   }
 
