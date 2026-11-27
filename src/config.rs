@@ -96,7 +96,7 @@ impl QuickManageTrigger
   pub fn all_labels() -> &'static [(&'static str, &'static str)]
   {
     &[
-      ("auto", "Hover on X11; middle-click fallback"),
+      ("auto", "Hover on X11; left-click fallback on Wayland"),
       ("middle_click", "Middle-click only"),
       ("disabled", "Disabled"),
     ]

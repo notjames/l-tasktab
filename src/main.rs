@@ -52,6 +52,14 @@ struct LttTray
 
 static TRAY_HANDLE: Mutex<Option<ksni::blocking::Handle<LttTray>>> = Mutex::new(None);
 
+fn x11_session_available() -> bool
+{
+  std::env::var("XDG_SESSION_TYPE")
+    .map(|value| value.eq_ignore_ascii_case("x11"))
+    .unwrap_or(false)
+    || (std::env::var_os("DISPLAY").is_some() && std::env::var_os("WAYLAND_DISPLAY").is_none())
+}
+
 fn record_tray_anchor(shared: &TrayShared, x: i32, y: i32)
 {
   if x >= 0 && y >= 0
@@ -65,11 +73,7 @@ fn record_tray_anchor(shared: &TrayShared, x: i32, y: i32)
 
 fn start_x11_hover_watcher(shared: TrayShared, qt: QThreadHandle<AppController>)
 {
-  let x11_session = std::env::var("XDG_SESSION_TYPE")
-    .map(|value| value.eq_ignore_ascii_case("x11"))
-    .unwrap_or(false)
-    || (std::env::var_os("DISPLAY").is_some() && std::env::var_os("WAYLAND_DISPLAY").is_none());
-  if !x11_session
+  if !x11_session_available()
   {
     return;
   }
@@ -219,8 +223,22 @@ impl ksni::Tray for LttTray
   fn activate(&mut self, x: i32, y: i32)
   {
     record_tray_anchor(&self.shared, x, y);
-    // Toggle: visible → hide; hidden → show.
-    self.qt.invoke_mut(AppController::toggle_main_window);
+    // X11 keeps the conventional left-click window toggle. On Wayland,
+    // StatusNotifier does not reliably deliver secondary/middle activation,
+    // so automatic mode uses left-click for the terminal popover instead.
+    if !x11_session_available()
+      && self.shared.quick_manage_enabled.load(Ordering::Relaxed)
+      && self.shared.quick_manage_hover.load(Ordering::Relaxed)
+    {
+      self.shared.quick_manage_visible.store(true, Ordering::Relaxed);
+      self.qt.invoke_mut(move |app: &mut AppController| {
+        app.open_quick_manage(x, y);
+      });
+    }
+    else
+    {
+      self.qt.invoke_mut(AppController::toggle_main_window);
+    }
   }
 
   fn secondary_activate(&mut self, x: i32, y: i32)

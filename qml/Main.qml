@@ -1052,7 +1052,7 @@ ApplicationWindow
             Layout.fillWidth: true
             wrapMode:         Text.WordWrap
             opacity:          0.7
-            text:             qsTr("Tray: left-click toggles the window; hover shows a tooltip; middle-click opens the terminal selector popup.")
+            text:             qsTr("Tray: X11 hover opens the terminal popup; Wayland left-click is the fallback. The tray menu always provides Quick Manage.")
           }
 
           Item { Layout.fillHeight: true }
