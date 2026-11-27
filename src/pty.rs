@@ -22,6 +22,9 @@ const DEFAULT_ROWS: u16 = 24;
 const DEFAULT_COLS: u16 = 80;
 const SCROLLBACK:   usize = 5_000;
 /// Background (unfocused) sessions coalesce UI wakes to this interval.
+/// Limit full RichText regeneration; PTY parsing remains immediate.
+const FOCUSED_NOTIFY_MS: u64 = 33;
+/// Background sessions update less often because they are not visible.
 const BG_NOTIFY_MS: u64 = 100;
 
 fn nz(n: u16) -> NonZeroU16
@@ -604,28 +607,29 @@ fn read_loop(
           Ok(mut g) =>
           {
             g.parser.process(&buf[..n]);
-            let html = screen_to_html(g.parser.screen());
-            match html_cache.lock()
-            {
-              Ok(mut c) => *c = Some(html.clone()),
-              Err(_)    => {}
-            }
-            html_dirty.store(false, Ordering::Relaxed);
+            html_dirty.store(true, Ordering::Relaxed);
 
-            // Deliver distinct frames to QML (caches by runtime, paints active).
-            // Focused → immediate; background → coalesce to BG_NOTIFY_MS.
-            // last_pushed is only advanced on push so a throttled change is
-            // still emitted on the next due read.
-            match html != last_pushed
-              && (is_focused
-                || last_pushed.is_empty()
-                || last_n.elapsed() >= Duration::from_millis(BG_NOTIFY_MS))
+            let notify_ms = if is_focused { FOCUSED_NOTIFY_MS } else { BG_NOTIFY_MS };
+            // Parse every read, but only regenerate and publish the complete
+            // HTML snapshot when the next frame is due. This avoids doing a
+            // full RichText conversion for every burst from a busy PTY.
+            match last_pushed.is_empty() || last_n.elapsed() >= Duration::from_millis(notify_ms)
             {
               true =>
               {
-                last_n      = Instant::now();
-                last_pushed = html.clone();
-                push_html   = Some(html);
+                let html = screen_to_html(g.parser.screen());
+                match html_cache.lock()
+                {
+                  Ok(mut c) => *c = Some(html.clone()),
+                  Err(_) => {}
+                }
+                html_dirty.store(false, Ordering::Relaxed);
+                last_n = Instant::now();
+                if html != last_pushed
+                {
+                  last_pushed = html.clone();
+                  push_html = Some(html);
+                }
               }
               false => {}
             }
