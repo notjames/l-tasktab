@@ -677,7 +677,7 @@ ApplicationWindow
               objectName: "runtimeTab"
               property string runtimeId: modelData.runtimeId
               property bool dragging: false
-              property real pressX: 0
+              property real dragPressX: 0
               text:       modelData.name
               width:      implicitWidth + 8
               opacity:    dragging ? 0.65 : 1.0
@@ -690,13 +690,13 @@ ApplicationWindow
                 onPressed:
                 {
                   root.dragRuntimeId = runtimeTab.runtimeId
-                  runtimeTab.pressX = mouse.x
+                  runtimeTab.dragPressX = mouse.x
                   runtimeTab.dragging = false
                 }
                 onPositionChanged:
                 {
                   if (!runtimeTab.dragging
-                    && Math.abs(mouse.x - runtimeTab.pressX) >= 8)
+                    && Math.abs(mouse.x - runtimeTab.dragPressX) >= 8)
                     runtimeTab.dragging = true
                   if (runtimeTab.dragging)
                   {
