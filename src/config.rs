@@ -60,6 +60,49 @@ impl ElevationMode
   }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum QuickManageTrigger
+{
+  #[default]
+  Auto,
+  MiddleClick,
+  Disabled,
+}
+
+impl QuickManageTrigger
+{
+  pub fn as_str(&self) -> &'static str
+  {
+    match self
+    {
+      Self::Auto => "auto",
+      Self::MiddleClick => "middle_click",
+      Self::Disabled => "disabled",
+    }
+  }
+
+  pub fn parse(value: &str) -> Option<Self>
+  {
+    match value
+    {
+      "auto" => Some(Self::Auto),
+      "middle_click" => Some(Self::MiddleClick),
+      "disabled" => Some(Self::Disabled),
+      _ => None,
+    }
+  }
+
+  pub fn all_labels() -> &'static [(&'static str, &'static str)]
+  {
+    &[
+      ("auto", "Hover on X11; middle-click fallback"),
+      ("middle_click", "Middle-click only"),
+      ("disabled", "Disabled"),
+    ]
+  }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppSettings
 {
@@ -69,6 +112,8 @@ pub struct AppSettings
   pub elevation_mode: ElevationMode,
   #[serde(default = "default_true")]
   pub quick_manage_enabled: bool,
+  #[serde(default)]
+  pub quick_manage_trigger: QuickManageTrigger,
   #[serde(default = "default_true")]
   pub hide_on_close:  bool,
 }
@@ -86,6 +131,7 @@ impl Default for AppSettings
       autostart:      false,
       elevation_mode: ElevationMode::AskOnceMemory,
       quick_manage_enabled: true,
+      quick_manage_trigger: QuickManageTrigger::Auto,
       hide_on_close:  true,
     }
   }

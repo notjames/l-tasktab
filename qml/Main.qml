@@ -18,6 +18,7 @@ ApplicationWindow
 
   property var    sessions:         []
   property var    elevationModes:   []
+  property var    quickManageTriggers: []
   property var    running:          []
   property int    selectedSession:  -1
   property bool   newSessionMode:   false
@@ -56,6 +57,7 @@ ApplicationWindow
     sessions       = AppController.sessionsJson()
     quickConfigured.model = sessions
     elevationModes = AppController.elevationModesJson()
+    quickManageTriggers = AppController.quickManageTriggersJson()
     dirty          = AppController.isDirty()
     statusText     = AppController.statusMessage()
     hideOnCloseBox.checked = AppController.hideOnClose()
@@ -68,6 +70,13 @@ ApplicationWindow
       elevationModeBox.model[i].id === mode
         && (elevationModeBox.currentIndex = i, true)
         && (i = elevationModeBox.count)
+    }
+    const trigger = AppController.quickManageTrigger()
+    for (let i = 0; i < quickManageTriggerBox.count; ++i)
+    {
+      quickManageTriggerBox.model[i].id === trigger
+        && (quickManageTriggerBox.currentIndex = i, true)
+        && (i = quickManageTriggerBox.count)
     }
 
     if (!sessions.length)
@@ -91,7 +100,6 @@ ApplicationWindow
   {
     const prev = activeRuntimeId
     running = AppController.runningSessionsJson()
-    quickRunning.model = running
     let idx = -1
     for (let i = 0; i < running.length; ++i)
       running[i].runtimeId === prev && (idx = i)
@@ -193,6 +201,10 @@ ApplicationWindow
     AppController.setHideOnClose(hideOnCloseBox.checked)
     AppController.setAutostart(autostartBox.checked)
     AppController.setQuickManageEnabled(quickManageBox.checked)
+    if (quickManageTriggerBox.currentIndex >= 0
+      && quickManageTriggerBox.model[quickManageTriggerBox.currentIndex])
+      AppController.setQuickManageTrigger(
+        quickManageTriggerBox.model[quickManageTriggerBox.currentIndex].id)
     if (elevationModeBox.currentIndex >= 0 && elevationModeBox.model[elevationModeBox.currentIndex])
       AppController.setElevationMode(elevationModeBox.model[elevationModeBox.currentIndex].id)
     const err = AppController.saveConfig()
@@ -301,6 +313,17 @@ ApplicationWindow
       terminalMouseModifiers(modifiers))
   }
 
+  function sendQuickTerminalMouse(kind, button, x, y, modifiers)
+  {
+    if (!activeRuntimeId)
+      return false
+    const cellX = Math.floor(x / Math.max(1, quickTermMetrics.averageCharacterWidth)) + 1
+    const cellY = Math.floor(y / Math.max(1, quickTermMetrics.height)) + 1
+    return AppController.sendTerminalMouse(
+      activeRuntimeId, kind, terminalMouseButton(button), cellX, cellY,
+      terminalMouseModifiers(modifiers))
+  }
+
   Timer
   {
     id:       resizeDebounce
@@ -328,6 +351,15 @@ ApplicationWindow
     quickManage.show()
     quickManage.raise()
     quickManage.requestActivate()
+    updateQuickManageBounds()
+    Qt.callLater(() => quickInput.forceActiveFocus())
+  }
+
+  function updateQuickManageBounds()
+  {
+    quickManage.visible
+      && AppController.setQuickManageBounds(
+        quickManage.x, quickManage.y, quickManage.width, quickManage.height)
   }
 
   onClosing: function (close)
@@ -392,6 +424,11 @@ ApplicationWindow
     {
       root.openQuickManage(x, y)
     }
+
+    function onQuickManageCloseRequested()
+    {
+      quickManage.hide()
+    }
   }
 
   // —— Quick Manage (tray hover companion / middle-click) ——
@@ -402,6 +439,17 @@ ApplicationWindow
     visible: false
     flags:   Qt.Tool | Qt.WindowStaysOnTopHint
     color:   palette.window
+    onXChanged: updateQuickManageBounds()
+    onYChanged: updateQuickManageBounds()
+    onWidthChanged: updateQuickManageBounds()
+    onHeightChanged: updateQuickManageBounds()
+    onVisibleChanged:
+    {
+      if (visible)
+        Qt.callLater(() => updateQuickManageBounds())
+      else
+        AppController.setQuickManageBounds(-1, -1, 0, 0)
+    }
 
     ColumnLayout
     {
@@ -415,46 +463,22 @@ ApplicationWindow
         font.bold: true
       }
 
-      ListView
+      TabBar
       {
-        id:                quickRunning
-        Layout.fillWidth:  true
-        Layout.preferredHeight: Math.min(160, Math.max(40, running.length * 40))
-        clip:              true
-        model:             running
-        delegate: ItemDelegate
+        id:               quickTabs
+        Layout.fillWidth: true
+        visible:          running.length > 0
+        currentIndex:     activeRuntime
+        Repeater
         {
-          width: ListView.view.width
-          text:  modelData.name
-          highlighted: modelData.runtimeId === activeRuntimeId
-          onClicked:
+          model: running
+          TabButton
           {
-            for (let i = 0; i < running.length; ++i)
-              running[i].runtimeId === modelData.runtimeId && (activeRuntime = i)
-            refreshTerminal()
-          }
-
-          RowLayout
-          {
-            anchors.right: parent.right
-            anchors.rightMargin: 8
-            anchors.verticalCenter: parent.verticalCenter
-            spacing: 4
-
-            Button
+            text: modelData.name
+            onClicked:
             {
-              text: qsTr("Open")
-              onClicked:
-              {
-                AppController.showMainWindow()
-                mainTabs.currentIndex = 0
-                quickManage.hide()
-              }
-            }
-            Button
-            {
-              text: qsTr("Stop")
-              onClicked: AppController.stopRunningSession(modelData.runtimeId)
+              activeRuntime = index
+              refreshTerminal()
             }
           }
         }
@@ -517,10 +541,62 @@ ApplicationWindow
           font.family: "monospace"
           font.pixelSize: 11
         }
+
+        FontMetrics
+        {
+          id:   quickTermMetrics
+          font: quickTerm.font
+        }
+
+        Item
+        {
+          id:           quickInput
+          anchors.fill: parent
+          focus:        true
+          Keys.onPressed: (event) => sendKey(event)
+        }
+
+        MouseArea
+        {
+          anchors.fill: parent
+          acceptedButtons: Qt.LeftButton | Qt.MiddleButton | Qt.RightButton
+          propagateComposedEvents: true
+          onPressed: (mouse) =>
+          {
+            quickInput.forceActiveFocus()
+            mouse.accepted = sendQuickTerminalMouse(
+              0, mouse.button, mouse.x, mouse.y, mouse.modifiers)
+          }
+          onReleased: (mouse) =>
+          {
+            mouse.accepted = sendQuickTerminalMouse(
+              1, mouse.button, mouse.x, mouse.y, mouse.modifiers)
+          }
+          onPositionChanged: (mouse) =>
+          {
+            if (mouse.buttons !== Qt.NoButton)
+              mouse.accepted = sendQuickTerminalMouse(
+                2,
+                mouse.buttons & Qt.LeftButton ? Qt.LeftButton : mouse.buttons & Qt.MiddleButton ? Qt.MiddleButton : Qt.RightButton,
+                mouse.x, mouse.y, mouse.modifiers)
+          }
+          onWheel: (wheel) =>
+          {
+            const kind = wheel.angleDelta.y > 0 ? 3 : 4
+            wheel.accepted = sendQuickTerminalMouse(
+              kind, Qt.NoButton, wheel.x, wheel.y, wheel.modifiers)
+          }
+        }
       }
 
       RowLayout
       {
+        Button
+        {
+          text: qsTr("Stop selected")
+          enabled: !!activeRuntimeId
+          onClicked: AppController.stopRunningSession(activeRuntimeId)
+        }
         Button
         {
           text: qsTr("Show main window")
@@ -944,7 +1020,19 @@ ApplicationWindow
           CheckBox
           {
             id:   quickManageBox
-            text: qsTr("Enable tray Quick Manage (middle-click fallback)")
+            text: qsTr("Enable tray terminal popover")
+          }
+
+          RowLayout
+          {
+            Label { text: qsTr("Popover trigger") }
+            ComboBox
+            {
+              id:                    quickManageTriggerBox
+              Layout.preferredWidth: 300
+              textRole:              "label"
+              model:                 quickManageTriggers
+            }
           }
 
           RowLayout

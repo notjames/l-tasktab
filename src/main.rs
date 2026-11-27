@@ -7,6 +7,8 @@ use std::fs::{self, OpenOptions};
 use std::io;
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::thread;
+use std::time::{Duration, Instant};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, Once};
 
@@ -18,7 +20,7 @@ use ksni::menu::StandardItem;
 use qtbridge::{QApp, QThreadHandle, QmlObject, qobject};
 use serde_json::{json, Value as JsonValue};
 
-use crate::config::{Config, ElevationMode, SessionConfig};
+use crate::config::{Config, ElevationMode, QuickManageTrigger, SessionConfig};
 use crate::pty::{FocusedRuntime, RunningSession};
 
 const APP_ID:   &str = "com.jimconn.ltasktabs";
@@ -34,6 +36,10 @@ struct TrayShared
 {
   window_visible:       Arc<AtomicBool>,
   quick_manage_enabled: Arc<AtomicBool>,
+  quick_manage_hover:   Arc<AtomicBool>,
+  quick_manage_visible: Arc<AtomicBool>,
+  tray_anchor:          Arc<Mutex<Option<(i32, i32)>>>,
+  popup_bounds:         Arc<Mutex<Option<(i32, i32, i32, i32)>>>,
   /// (runtime_id, name)
   sessions:       Arc<Mutex<Vec<(String, String)>>>,
 }
@@ -45,6 +51,108 @@ struct LttTray
 }
 
 static TRAY_HANDLE: Mutex<Option<ksni::blocking::Handle<LttTray>>> = Mutex::new(None);
+
+fn record_tray_anchor(shared: &TrayShared, x: i32, y: i32)
+{
+  if x >= 0 && y >= 0
+  {
+    if let Ok(mut anchor) = shared.tray_anchor.lock()
+    {
+      *anchor = Some((x, y));
+    }
+  }
+}
+
+fn start_x11_hover_watcher(shared: TrayShared, qt: QThreadHandle<AppController>)
+{
+  let x11_session = std::env::var("XDG_SESSION_TYPE")
+    .map(|value| value.eq_ignore_ascii_case("x11"))
+    .unwrap_or(false)
+    || (std::env::var_os("DISPLAY").is_some() && std::env::var_os("WAYLAND_DISPLAY").is_none());
+  if !x11_session
+  {
+    return;
+  }
+
+  thread::Builder::new()
+    .name("ltt-tray-hover".into())
+    .spawn(move || {
+      use x11rb::connection::Connection;
+      use x11rb::protocol::xproto::ConnectionExt;
+
+      let Ok((connection, screen_num)) = x11rb::connect(None)
+      else
+      {
+        eprintln!("{APP_NAME}: X11 hover detection unavailable; using middle-click fallback");
+        return;
+      };
+      let root = connection.setup().roots[screen_num].root;
+      let mut was_in_anchor = false;
+      let mut outside_since: Option<Instant> = None;
+
+      loop
+      {
+        let pointer = match connection.query_pointer(root)
+        {
+          Ok(cookie) => cookie.reply().ok(),
+          Err(_) => None,
+        };
+        let Some(pointer) = pointer
+        else
+        {
+          break;
+        };
+        let pointer_x = i32::from(pointer.root_x);
+        let pointer_y = i32::from(pointer.root_y);
+        let anchor = shared.tray_anchor.lock().ok().and_then(|g| *g);
+        let bounds = shared.popup_bounds.lock().ok().and_then(|g| *g);
+        let in_anchor = anchor
+          .map(|(x, y)| (pointer_x - x).abs() <= 24 && (pointer_y - y).abs() <= 24)
+          .unwrap_or(false);
+        let in_popup = bounds
+          .map(|(x, y, width, height)| {
+            pointer_x >= x
+              && pointer_y >= y
+              && pointer_x < x + width
+              && pointer_y < y + height
+          })
+          .unwrap_or(false);
+
+        if in_anchor
+          && !was_in_anchor
+          && shared.quick_manage_enabled.load(Ordering::Relaxed)
+          && shared.quick_manage_hover.load(Ordering::Relaxed)
+        {
+          shared.quick_manage_visible.store(true, Ordering::Relaxed);
+          let x = pointer_x;
+          let y = pointer_y;
+          qt.invoke_mut(move |app: &mut AppController| {
+            app.open_quick_manage(x, y);
+          });
+        }
+        was_in_anchor = in_anchor;
+
+        if shared.quick_manage_visible.load(Ordering::Relaxed)
+          && !in_anchor
+          && !in_popup
+        {
+          let since = outside_since.get_or_insert_with(Instant::now);
+          if since.elapsed() >= Duration::from_millis(250)
+          {
+            shared.quick_manage_visible.store(false, Ordering::Relaxed);
+            outside_since = None;
+            qt.invoke_mut(AppController::close_quick_manage);
+          }
+        }
+        else
+        {
+          outside_since = None;
+        }
+        thread::sleep(Duration::from_millis(80));
+      }
+    })
+    .ok();
+}
 
 fn load_tray_png(bytes: &'static [u8]) -> Option<ksni::Icon>
 {
@@ -108,8 +216,9 @@ impl ksni::Tray for LttTray
     ksni::Status::Active
   }
 
-  fn activate(&mut self, _x: i32, _y: i32)
+  fn activate(&mut self, x: i32, y: i32)
   {
+    record_tray_anchor(&self.shared, x, y);
     // Toggle: visible → hide; hidden → show.
     self.qt.invoke_mut(AppController::toggle_main_window);
   }
@@ -117,8 +226,10 @@ impl ksni::Tray for LttTray
   fn secondary_activate(&mut self, x: i32, y: i32)
   {
     // Middle-click / secondary → Quick Manage popup near cursor.
+    record_tray_anchor(&self.shared, x, y);
     if self.shared.quick_manage_enabled.load(Ordering::Relaxed)
     {
+      self.shared.quick_manage_visible.store(true, Ordering::Relaxed);
       self.qt.invoke_mut(move |app: &mut AppController| {
         app.open_quick_manage(x, y);
       });
@@ -378,6 +489,8 @@ impl Default for AppController
   {
     let tray_shared = TrayShared {
       quick_manage_enabled: Arc::new(AtomicBool::new(true)),
+      quick_manage_hover: Arc::new(AtomicBool::new(true)),
+      quick_manage_visible: Arc::new(AtomicBool::new(false)),
       ..Default::default()
     };
     match Config::load_or_create()
@@ -448,6 +561,13 @@ impl AppController
       .tray_shared
       .quick_manage_enabled
       .store(self.config.app.quick_manage_enabled, Ordering::Relaxed);
+    self
+      .tray_shared
+      .quick_manage_hover
+      .store(
+        self.config.app.quick_manage_trigger == QuickManageTrigger::Auto,
+        Ordering::Relaxed,
+      );
     match self.tray_shared.sessions.lock()
     {
       Ok(mut g) =>
@@ -524,7 +644,18 @@ impl AppController
 
   pub fn open_quick_manage(&mut self, x: i32, y: i32)
   {
+    if !self.config.app.quick_manage_enabled
+    {
+      return;
+    }
+    self.tray_shared.quick_manage_visible.store(true, Ordering::Relaxed);
     self.quick_manage_requested(x, y);
+  }
+
+  fn close_quick_manage(&mut self)
+  {
+    self.tray_shared.quick_manage_visible.store(false, Ordering::Relaxed);
+    self.quick_manage_close_requested();
   }
 
   pub fn focus_running_session(&mut self, runtime_id: String)
@@ -600,9 +731,12 @@ impl AppController
   fn start_tray(&self)
   {
     static START: Once = Once::new();
-    let qt     = self.get_thread_handle();
-    let shared = self.tray_shared.clone();
+    let qt        = self.get_thread_handle();
+    let hover_qt  = self.get_thread_handle();
+    let shared    = self.tray_shared.clone();
+    let hover_shared = shared.clone();
     START.call_once(move || {
+      start_x11_hover_watcher(hover_shared, hover_qt);
       std::thread::Builder::new()
         .name("ltt-tray".into())
         .spawn(move || match (LttTray { qt, shared }).spawn()
@@ -645,6 +779,9 @@ impl AppController
 
   #[qsignal(qml_name = "quickManageRequested")]
   fn quick_manage_requested(&mut self, x: i32, y: i32);
+
+  #[qsignal(qml_name = "quickManageCloseRequested")]
+  fn quick_manage_close_requested(&mut self);
 
   #[qslot(qml_name = "appId")]
   fn app_id(&self) -> String
@@ -730,6 +867,50 @@ impl AppController
       self.config.app.quick_manage_enabled = value;
       self.mark_dirty("Tray Quick Manage binding updated (unsaved)");
       self.sync_tray_shared();
+    }
+  }
+
+  #[qslot(qml_name = "quickManageTrigger")]
+  fn quick_manage_trigger(&self) -> String
+  {
+    self.config.app.quick_manage_trigger.as_str().to_string()
+  }
+
+  #[qslot(qml_name = "setQuickManageTrigger")]
+  fn set_quick_manage_trigger(&mut self, value: String)
+  {
+    if let Some(trigger) = QuickManageTrigger::parse(&value)
+    {
+      if trigger != self.config.app.quick_manage_trigger
+      {
+        self.config.app.quick_manage_trigger = trigger;
+        self.mark_dirty("Tray Quick Manage trigger updated (unsaved)");
+        self.sync_tray_shared();
+      }
+    }
+  }
+
+  #[qslot(qml_name = "quickManageTriggersJson")]
+  fn quick_manage_triggers_json(&self) -> JsonValue
+  {
+    json!(
+      QuickManageTrigger::all_labels()
+        .iter()
+        .map(|(id, label)| json!({ "id": id, "label": label }))
+        .collect::<Vec<_>>()
+    )
+  }
+
+  #[qslot(qml_name = "setQuickManageBounds")]
+  fn set_quick_manage_bounds(&mut self, x: i32, y: i32, width: i32, height: i32)
+  {
+    self
+      .tray_shared
+      .quick_manage_visible
+      .store(width > 0 && height > 0, Ordering::Relaxed);
+    if let Ok(mut bounds) = self.tray_shared.popup_bounds.lock()
+    {
+      *bounds = Some((x, y, width.max(0), height.max(0)));
     }
   }
 
