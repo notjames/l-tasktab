@@ -38,9 +38,12 @@ ApplicationWindow
   onActiveRuntimeChanged:
   {
     AppController.setFocusedRuntime(activeRuntimeId)
-    activeRuntimeId && htmlById[activeRuntimeId]
-      ? applyTerminalHtml(htmlById[activeRuntimeId])
-      : refreshTerminal()
+    if (activeRuntimeId)
+    {
+      htmlById[activeRuntimeId]
+        ? applyTerminalHtml(htmlById[activeRuntimeId])
+        : refreshTerminal()
+    }
     resizeDebounce.restart()
     Qt.callLater(() => termInput.forceActiveFocus())
   }

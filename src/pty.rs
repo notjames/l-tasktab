@@ -3,6 +3,7 @@
 use std::io::{Read, Write};
 use std::num::NonZeroU16;
 use std::path::PathBuf;
+use std::process::Command as ProcessCommand;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -42,6 +43,38 @@ fn expand_cwd(cwd: &str) -> PathBuf
 fn user_shell() -> String
 {
   std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into())
+}
+
+fn resolve_elevated_command(command: &str) -> String
+{
+  let trimmed = command.trim();
+  let end = trimmed.find(char::is_whitespace).unwrap_or(trimmed.len());
+  let program = &trimmed[..end];
+  if program.contains('/')
+  {
+    return trimmed.to_string();
+  }
+  let output = ProcessCommand::new("sh")
+    .args(["-c", "command -v -- \"$1\"", "ltt", program])
+    .output();
+  let Ok(output) = output
+  else
+  {
+    return trimmed.to_string();
+  };
+  if !output.status.success()
+  {
+    return trimmed.to_string();
+  }
+  let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+  if path.starts_with('/')
+  {
+    format!("{path}{}", &trimmed[end..])
+  }
+  else
+  {
+    trimmed.to_string()
+  }
 }
 
 fn build_command(cfg: &SessionConfig, elevation_mode: &ElevationMode) -> CommandBuilder
@@ -91,7 +124,12 @@ fn build_command(cfg: &SessionConfig, elevation_mode: &ElevationMode) -> Command
     false =>
     {
       cmd.arg("-lic");
-      cmd.arg(format!("exec {}", cfg.command.trim()));
+      let command = match cfg.elevated
+      {
+        true => resolve_elevated_command(&cfg.command),
+        false => cfg.command.trim().to_string(),
+      };
+      cmd.arg(format!("exec {command}"));
     }
   }
   cmd

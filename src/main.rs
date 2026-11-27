@@ -442,7 +442,8 @@ impl AppController
     );
     self.sync_tray_shared();
     self.running_changed();
-    self.terminal_updated(runtime_id, String::new());
+    // Keep the last frame available long enough for the status message to
+    // explain why a short-lived command disappeared.
     self.config_changed();
   }
 
