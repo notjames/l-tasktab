@@ -212,6 +212,26 @@ ApplicationWindow
       : (statusText = qsTr("Settings saved"), refreshConfig())
   }
 
+  function elevationModeHelp()
+  {
+    if (elevationModeBox.currentIndex < 0 || !elevationModeBox.model
+      || !elevationModeBox.model[elevationModeBox.currentIndex])
+      return ""
+    switch (elevationModeBox.model[elevationModeBox.currentIndex].id)
+    {
+    case "ask_once_memory":
+      return qsTr("Prompts when sudo needs authentication, then reuses the user's sudo ticket.")
+    case "ask_every_time":
+      return qsTr("Invalidates the sudo ticket before each start and prompts for the password.")
+    case "sudo_ticket":
+      return qsTr("Never prompts. The session starts only when a valid sudo ticket already exists.")
+    case "keyring":
+      return qsTr("Not available yet. Elevated sessions cannot start in this mode.")
+    default:
+      return ""
+    }
+  }
+
   function sendKey(event)
   {
     if (!activeRuntimeId)
@@ -983,6 +1003,18 @@ ApplicationWindow
               textRole:              "label"
               model:                 elevationModes
             }
+          }
+
+          Label
+          {
+            Layout.fillWidth: true
+            wrapMode:         Text.WordWrap
+            color:            elevationModeBox.currentIndex >= 0
+                               && elevationModeBox.model[elevationModeBox.currentIndex]
+                               && elevationModeBox.model[elevationModeBox.currentIndex].id === "keyring"
+                               ? "#e6a23c"
+                               : palette.placeholderText
+            text:             elevationModeHelp()
           }
 
           Label

@@ -52,10 +52,10 @@ impl ElevationMode
   pub fn all_labels() -> &'static [(&'static str, &'static str)]
   {
     &[
-      ("ask_once_memory", "Ask once (memory)"),
+      ("ask_once_memory", "Ask when needed"),
       ("ask_every_time",  "Ask every time"),
-      ("sudo_ticket",     "Reuse sudo ticket"),
-      ("keyring",         "Keyring (optional)"),
+      ("sudo_ticket",     "Existing ticket only"),
+      ("keyring",         "Keyring (unavailable)"),
     ]
   }
 }

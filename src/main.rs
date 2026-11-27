@@ -554,11 +554,17 @@ impl AppController
 
   pub fn on_terminal_exited(&mut self, runtime_id: String)
   {
-    let name = self
+    let ended = self
       .running
       .iter()
       .find(|s| s.runtime_id == runtime_id)
-      .map(|s| s.name.clone())
+      .map(|s| {
+        let screen = s.snapshot().to_ascii_lowercase();
+        (s.name.clone(), s.elevated, screen)
+      });
+    let name = ended
+      .as_ref()
+      .map(|(name, _, _)| name.clone())
       .unwrap_or_else(|| runtime_id.clone());
     self.running.retain(|s| s.runtime_id != runtime_id);
     match self.focused.lock()
@@ -566,9 +572,35 @@ impl AppController
       Ok(mut g) if g.as_ref() == Some(&runtime_id) => *g = self.running.first().map(|s| s.runtime_id.clone()),
       _ => {}
     }
-    self.status_message = format!(
-      "Session '{name}' ended. Check that its command exists and is on PATH."
-    );
+    self.status_message = match ended {
+      Some((_, true, screen)) if screen.contains("incorrect password")
+        || screen.contains("sorry, try again")
+        || screen.contains("authentication failure") =>
+        format!("Elevated session '{name}' ended: sudo rejected the password."),
+      Some((_, true, screen)) if screen.contains("a password is required")
+        || screen.contains("no password was provided") =>
+        format!(
+          "Elevated session '{name}' ended: sudo needs a password. \
+           Choose 'Ask when needed' or authenticate before using 'Existing ticket only'."
+        ),
+      Some((_, true, screen)) if screen.contains("not in the sudoers")
+        || screen.contains("is not allowed to run sudo") =>
+        format!("Elevated session '{name}' ended: this user is not allowed to use sudo."),
+      Some((_, true, screen)) if screen.contains("must be run from a terminal")
+        || screen.contains("no tty present") =>
+        format!(
+          "Elevated session '{name}' ended: sudo could not use the terminal. \
+           Check the sudoers requiretty setting."
+        ),
+      Some((_, true, _)) => format!(
+        "Elevated session '{name}' ended. Check the sudo password, sudo policy, \
+         and configured command."
+      ),
+      Some((_, false, _)) => format!(
+        "Session '{name}' ended. Check that its command exists and is on PATH."
+      ),
+      None => format!("Session '{name}' ended."),
+    };
     self.sync_tray_shared();
     self.running_changed();
     // Keep the last frame available long enough for the status message to
